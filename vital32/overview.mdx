@@ -1,0 +1,81 @@
+---
+title: "Vital32: Continuous Biosensing Wearable for LifeSphere"
+sidebarTitle: "Overview"
+description: "Vital32 is LifeSphere's 14-sensor ESP32 biosensing wearable. It predicts seizures, immune activation, and biological age in real time."
+---
+
+Vital32 is the primary biological sensing layer of the LifeSphere ecosystem. It is a wrist-worn device built on the **ESP32 WROOM-32** microcontroller and integrates a **14-sensor array** spanning electrochemical, optical, inertial, and thermal modalities. Every biometric inference Vital32 performs — from detecting a fall in progress to estimating immune activation 24–48 hours before symptom onset — executes locally on-device before being committed to the shared Firebase state backbone that synchronises all five LifeSphere subsystems.
+
+The design philosophy is: **measure everything the body expresses silently, then reason about it faster than the care system needs to react.**
+
+---
+
+## Sensor Array
+
+Vital32 mounts twelve discrete sensors on a compact PCB wristband form factor, communicating with the ESP32 over a shared I²C bus (GPIO 21/22) plus one ADC channel. Each sensor was selected for low power draw, I²C compatibility, and clinical-grade signal quality at consumer price points.
+
+| Sensor | Modality | I²C Address | What It Measures |
+|---|---|---|---|
+| **MAX30102** | Optical PPG | `0x57` | Heart rate, SpO₂ (blood oxygen saturation) |
+| **MPU6050** | Inertial | `0x68` | 3-axis accelerometer + 3-axis gyroscope (fall detection, tremor characterisation) |
+| **MLX90614** | IR Thermometry | `0x5A` | Contactless skin surface temperature |
+| **BME688** | MEMS Gas/Env | `0x76` | VOC index, humidity, barometric pressure, ambient temperature |
+| **VEML6075** | UV Photodiode | `0x10` | UVA + UVB irradiance, UV index |
+| **Grove GSR v1.0** | Electrodermal | GPIO 35 (ADC) | Galvanic skin response — sympathetic nervous system arousal |
+| **AD5933** | Impedance | `0x0D` | Bioelectrical impedance spectroscopy — tissue hydration, body composition |
+| **SSD1306 OLED** | Display | `0x3C` | 128×64 on-wrist status display for vitals, alerts, and BLE pairing status |
+
+<Note>
+  All seven I²C devices share the same GPIO 21 (SDA) / GPIO 22 (SCL) bus. Each device carries a distinct 7-bit address, so no multiplexer is required. See the [Hardware Assembly Guide](/vital32/hardware) for exact wiring and pull-up resistor values.
+</Note>
+
+---
+
+## On-Device AI Capabilities
+
+Vital32 does not stream raw sensor data and rely on cloud inference. It runs three distinct machine learning models locally on the ESP32, each operating on a different timescale and biological hypothesis.
+
+### Isolation Forest — Anomaly Detection
+
+A lightweight Isolation Forest model scores every biometric sample against a rolling baseline calibrated to your individual physiology during the first 72 hours of wear. Anomaly scores are computed every second from the fused vector of HRV (RMSSD), GSR, skin temperature, SpO₂, and VOC index.
+
+**Key capability:** The model detects subtle multi-modal deviations that precede immune activation — elevated VOC, depressed HRV, and rising skin temperature — **24–48 hours before the user experiences any subjective symptoms**. This window is sufficient for the LifeSphere system to pre-position HollowRover, adjust HollowCore environmental settings, and alert nominated contacts.
+
+### LSTM — Pre-Seizure Prediction
+
+A Long Short-Term Memory network runs on a 5-second rolling window of MPU6050 gyroscope data combined with MAX30102 PPG morphology. The model was trained on ictal and pre-ictal signal patterns to classify emerging seizure precursors.
+
+**Key capability:** The model flags a high-probability pre-seizure state **up to 30 minutes before onset**, triggering HollowRover to navigate to within 1 m of the user and enter protective standby.
+
+### Biological Age Estimator
+
+Every 30 seconds, Vital32 computes a biological age estimate from the fused biomarker vector: HRV RMSSD, LF/HF autonomic ratio, SpO₂ trend, BIA-derived hydration index, and skin temperature variance. The estimate is written to `bio_age` in the Firebase state object and trended across sessions to surface accelerated aging patterns.
+
+---
+
+## Firebase Integration
+
+Vital32 writes to the shared Firebase Realtime Database every 30 seconds at minimum, or immediately on event triggers (fall detected, anomaly score above threshold, pre-seizure flag). The Firebase node `/vital32` acts as the **single source of biological truth** for the entire LifeSphere ecosystem.
+
+Every other subsystem — HollowRover, SphereAI, HollowCore, and EntryGuard — subscribes to this state object and reacts without any additional messaging layer. Transmission latency from sensor sample to Firebase commit is consistently **under 150 ms** on a stable 2.4 GHz Wi-Fi connection.
+
+See the [Firebase Architecture](/backend/firebase-architecture) page for full schema documentation.
+
+---
+
+## Explore the Vital32 Subsystem
+
+<CardGroup cols={2}>
+  <Card title="Hardware Assembly" icon="screwdriver-wrench" href="/vital32/hardware">
+    Complete component list, exact wiring diagram, power architecture, and I²C address map for the Vital32 PCB.
+  </Card>
+  <Card title="Firmware Architecture" icon="microchip" href="/vital32/firmware">
+    ESP32 Arduino C++ main loop, tick scheduler, sensor read cadence, Firebase write schema, and power management.
+  </Card>
+  <Card title="Fall Detection Algorithm" icon="person-falling" href="/vital32/fall-detection">
+    Three-stage freefall → impact → immobility algorithm with physical threshold derivation and calibration instructions.
+  </Card>
+  <Card title="HRV & Signal Processing" icon="waveform-lines" href="/vital32/hrv-and-signals">
+    RMSSD computation, LF/HF spectral decomposition, cortisol estimation, and BIA hydration quantification.
+  </Card>
+</CardGroup>

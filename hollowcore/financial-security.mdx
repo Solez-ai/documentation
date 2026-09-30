@@ -1,0 +1,142 @@
+---
+title: 'HollowCore Financial Anomaly Detection and Biometric Authorization'
+sidebarTitle: 'Financial Security'
+description: 'HollowCore scores transactions via Isolation Forest and gates high-risk approvals behind three-factor biometric verification: face, fingerprint, wearable.'
+---
+
+LifeSphere's protective scope does not end at the body. The same population HollowCore monitors for physiological risk — elderly individuals, people with cognitive impairment, those recovering from acute medical events — are also disproportionately targeted by financial fraud and unauthorized account access. HollowCore extends the ecosystem's monitoring philosophy to transactions: every incoming financial event is scored against a personalized behavioral model, anomalies are surfaced immediately to the occupant and guardian, and high-risk authorizations require multi-factor biometric verification that cannot be satisfied by a stolen phone alone.
+
+---
+
+## System Architecture
+
+HollowCore's financial security module runs as a persistent backend service on the RDK X5, alongside the biometric automation engine. It connects to banking and subscription services via secure OAuth 2.0 APIs and maintains a live transaction stream. Each transaction event passes through three sequential stages:
+
+<Steps>
+  <Step title="Anomaly Scoring">
+    The transaction is scored by an **Isolation Forest** model trained on the user's historical spending data. The model assigns an anomaly score reflecting how unusual the transaction is relative to the established behavioral baseline. Transactions above a configurable score threshold are flagged for notification.
+  </Step>
+  <Step title="Smart Notification">
+    Flagged transactions trigger an **instant multi-channel alert**: a push notification to the LifeSphere mobile app and a structured display update on HollowRover's OLED screen. Both surfaces present the full transaction details and offer one-tap actions — freeze the card or initiate a dispute — without requiring the user to log into a separate banking application.
+  </Step>
+  <Step title="Biometric Authorization Gate">
+    Transactions classified as high-risk — large amounts, new payees, geographic anomalies, or account-level changes — enter an authorization hold. The transaction does not proceed until all three biometric factors are confirmed. If authorization is not completed within the session timeout, the transaction is automatically declined and the event is logged.
+  </Step>
+</Steps>
+
+---
+
+## Anomaly Detection Model
+
+The financial anomaly detector is an **Isolation Forest** trained on the user's historical transaction records. Isolation Forest is particularly well-suited to this domain: it is unsupervised (no labeled fraud data is required), it scales efficiently to high-dimensional transaction feature spaces, and its anomaly score has a direct probabilistic interpretation.
+
+Each transaction is featurized before scoring:
+
+| Feature | Description |
+|---|---|
+| `amount_normalized` | Transaction amount normalized against 90-day mean and standard deviation |
+| `merchant_category` | One-hot encoded merchant category code |
+| `hour_of_day` | Cyclic-encoded transaction hour |
+| `day_of_week` | Cyclic-encoded day |
+| `is_new_payee` | Binary flag — first transaction to this payee |
+| `geographic_distance` | Great-circle distance from the user's modal transaction location |
+| `channel` | In-person / online / ATM |
+
+The model produces a scalar anomaly score in `[0, 1]`. Scores above `0.72` (configurable) are flagged for notification; scores above `0.90` trigger the biometric authorization gate. This two-tier threshold allows low-certainty anomalies to surface as informational alerts while reserving the full authorization friction for genuinely suspicious events.
+
+<Note>
+  The Isolation Forest architecture used here is identical in structure to the biometric anomaly detector applied to Vital32 physiological streams. Both models are trained per-user on that individual's historical data, share the same scikit-learn implementation, and are retrained on a weekly rolling basis as new data accumulates.
+</Note>
+
+---
+
+## Smart Notification
+
+When a transaction is flagged, HollowCore publishes an alert to `/lifesphere/hollowcore` under the `financial_alerts` subtree. Two notification channels fire in parallel:
+
+**LifeSphere mobile app** — a push notification containing the merchant name, transaction amount, timestamp, and anomaly score. The notification action sheet presents three options without requiring app navigation:
+
+- **Approve** — marks the transaction as legitimate and updates the behavioral model with a confirmed-normal label.
+- **Freeze card** — sends a card-freeze command to the connected banking API and publishes the freeze event to Firebase.
+- **Dispute charge** — opens a pre-filled dispute form with the transaction details populated.
+
+**HollowRover OLED** — when the rover is within proximity of the occupant, it surfaces the alert on its OLED display with a condensed view of the transaction details. This ensures the occupant sees the alert even if their phone is not immediately accessible.
+
+---
+
+## Biometric Transaction Authorization
+
+For high-risk transactions, HollowCore mandates confirmation across three independent biometric factors before the transaction is released from its authorization hold:
+
+<CardGroup cols={3}>
+  <Card
+    title="Facial Recognition"
+    icon="camera"
+    color="#ef7025"
+  >
+    EntryGuard or HollowRover's camera captures the occupant's face and runs it through the DeepFace embedding pipeline. The identity must match a registered occupant with a cosine distance below the recognition threshold.
+  </Card>
+  <Card
+    title="Fingerprint Scan"
+    icon="fingerprint"
+    color="#4fa1ab"
+  >
+    A fingerprint biometric is captured via the registered mobile device or a dedicated sensor. The template is matched against the enrolled biometric on-device — the raw fingerprint data never leaves the local device.
+  </Card>
+  <Card
+    title="Vital32 Proximity"
+    icon="watch"
+    color="#ef7025"
+  >
+    The Vital32 wearable must be detected as present and paired via BLE within the authorization session window. This confirms physical proximity of the registered occupant — the wearable cannot be spoofed remotely.
+  </Card>
+</CardGroup>
+
+<Note>
+  A compromised phone alone cannot authorize a high-risk transaction. The three-factor requirement distributes the authorization across physical presence (Vital32 wearable proximity), biometric identity (facial recognition via a fixed camera), and device-bound credential (fingerprint). All three must be satisfied within the same session window. Partial completion — two of three factors — is logged as a failed authorization attempt and escalates the alert to the registered guardian.
+</Note>
+
+---
+
+## Firebase Schema
+
+Financial security events are published to `/lifesphere/hollowcore` for pickup by the mobile app, HollowRover, and any registered guardian subscribers:
+
+```json
+{
+  "lifesphere": {
+    "hollowcore": {
+      "financial_alerts": {
+        "<alert_id>": {
+          "merchant": "Unknown Online Retailer",
+          "amount": 847.50,
+          "currency": "USD",
+          "anomaly_score": 0.94,
+          "risk_tier": "high",
+          "authorization_status": "pending",
+          "factors_confirmed": [],
+          "timestamp": 1718201200
+        }
+      }
+    }
+  }
+}
+```
+
+`authorization_status` transitions through `pending` → `authorized` | `declined` | `timed_out`. The `factors_confirmed` array accumulates each verified factor (`facial`, `fingerprint`, `vital32_proximity`) as they are satisfied. This field is append-only — once a factor is confirmed within a session, it cannot be removed.
+
+---
+
+## Integration
+
+HollowCore's financial security module integrates with external financial services through a thin adapter layer:
+
+| Integration Point | Protocol | Notes |
+|---|---|---|
+| Banking APIs | OAuth 2.0 + REST | Read transaction stream, issue card-freeze commands |
+| Subscription services | Webhook ingest | Recurring charge notifications parsed into transaction events |
+| LifeSphere mobile app | Firebase RTDB listener | Real-time alert delivery without polling |
+| HollowRover OLED | MQTT (`lifesphere/rover/display`) | Proximity-aware display update |
+| EntryGuard / HollowRover camera | Internal RPC | Facial recognition authorization request |
+
+The adapter layer is isolated from the anomaly scoring engine — adding a new financial institution requires implementing a single adapter interface, not modifying the model or the authorization pipeline.

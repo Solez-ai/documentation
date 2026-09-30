@@ -1,0 +1,218 @@
+---
+title: 'LifeSphere AI Model Performance Summary and Benchmarks'
+sidebarTitle: 'Model Performance'
+description: 'Consolidated performance benchmarks, training data sources, threshold rationale, and hardware deployment targets for every AI model in the LifeSphere pipeline.'
+---
+
+
+<Info>
+  **Personalized Baseline Paradigm:** Every threshold in the LifeSphere pipeline is evaluated against *your personal physiological baseline* — not against population-level clinical reference ranges. A reading that is anomalous for you may be entirely normal for another user, and vice versa. This is the fundamental architectural distinction between LifeSphere and conventional remote patient monitoring systems.
+</Info>
+
+## Full Model Summary
+
+| Model | Architecture | Output | Threshold | Update Rate |
+|---|---|---|---|---|
+| Anomaly Detector | Isolation Forest (100 trees) | Score 0–1 | 0.7 soft / 0.9 emergency | Every 30 s |
+| Pre-Seizure LSTM | 2×LSTM(64,32) + Dense | Prob 0–1 | 0.85 | Every 5 s |
+| Emotional Classifier | Weighted 3-stream fusion | State category | Highest confidence | Every 15 m |
+| Cortisol Estimator | Gradient Boost (200 trees) | ng/dL estimate | — | Every 15 m |
+| Biological Age Clock | Ensemble RF + XGBoost | Age in years | — | Daily |
+| Cognitive Tracker | CUSUM statistical drift | Deviation score | 2-sigma | Daily |
+
+---
+
+## Training Data Sources
+
+### Anomaly Detector — Isolation Forest
+
+| Property | Detail |
+|---|---|
+| Source | 30-day personal baseline (user-specific) |
+| Sample count | ~86,400 feature vectors (one per 30 s over 30 days) |
+| Features | Heart rate, SpO2, HRV RMSSD, HRV LF/HF, GSR, skin temperature, BIA impedance |
+| Contamination assumption | 5% of baseline data expected anomalous (noise, transient illness) |
+| Retraining trigger | Manual caregiver request or significant lifestyle change event |
+
+The Isolation Forest is the only model in the pipeline trained **entirely** on the target user's data. It has no pretraining phase on population datasets and therefore has no population-level priors embedded in its decision boundaries.
+
+### Pre-Seizure LSTM
+
+| Property | Detail |
+|---|---|
+| Primary dataset | CHB-MIT Scalp EEG Database (Shoeb, MIT, 2009; PhysioNet) |
+| Secondary dataset | Epilepsy iEEG Prediction Dataset (Kaggle/PhysioNet 2014) |
+| Subjects | 22 pediatric patients, 916 labeled seizures (CHB-MIT) |
+| Window length | 5 minutes (300 time steps at 1 Hz) |
+| Class balance | Pre-ictal windows up-weighted to address interictal majority class |
+| Fine-tuning | Incremental on-device fine-tuning as user seizure history accumulates |
+
+<Warning>
+  CHB-MIT is an EEG dataset. LifeSphere bridges to the wearable domain by extracting HRV, autonomic surrogate, and motion features from ECG channels present in the recordings. The domain gap between scalp EEG and wrist-worn wearable biomarkers is addressed through feature engineering and per-user fine-tuning.
+</Warning>
+
+### Emotional Classifier
+
+| Property | Detail |
+|---|---|
+| Language Agent (DistilBERT) | GLUE/SST-2 fine-tuned; further fine-tuned on 30-day user transcripts |
+| Voice Agent (Librosa features) | RAVDESS Emotional Speech Dataset; fine-tuned on user voice samples |
+| Biology Agent | Direct inference from Vital32 stream; no separate training dataset |
+| MetaClassifier weights | Learned via logistic meta-learner on 30-day agent output history |
+
+### Cortisol Estimator
+
+| Property | Detail |
+|---|---|
+| Architecture | Gradient Boosting Regressor, 200 trees, max_depth=4 |
+| Input features | GSR, HRV RMSSD, HRV LF/HF, skin temperature, time-of-day (circadian phase) |
+| Training data | Physiological-cortisol correlation datasets; cross-validated on wearable sensor studies |
+| Output | Blood cortisol estimate in ng/dL (not a diagnostic measurement) |
+| Calibration | Softly calibrated to individual via 30-day physiological baseline |
+
+### Biological Age Clock
+
+| Property | Detail |
+|---|---|
+| Architecture | Ensemble: Random Forest (500 trees) + XGBoost (300 estimators); predictions averaged |
+| Input features | Multi-sensor biometric aggregate: resting HR, HRV, SpO2, skin temperature, BIA, activity level, sleep duration |
+| Training data | Multi-sensor biometric aging datasets; aligned to Horvath epigenetic clock literature |
+| Output | Biological age estimate in years |
+| Clinical significance | Divergence from chronological age indicates accelerated or decelerated aging trajectory |
+
+### Cognitive Tracker
+
+| Property | Detail |
+|---|---|
+| Algorithm | CUSUM (Cumulative Sum Control Chart) — non-parametric sequential drift detector |
+| Input features | Unique word ratio, semantic coherence score, topic repetition rate (from Language Agent) |
+| Baseline | 30-day rolling personal average for all three metrics |
+| Sensitivity | Slack parameter $k = 0.5$; detects shifts of $\geq 1\sigma$ within ~10 measurement cycles |
+| Alert threshold | $\|S_t\| > 2\sigma$ sustained deviation from personal baseline |
+
+---
+
+## Threshold Rationale
+
+Every alert threshold in LifeSphere was selected to minimize one of two failure modes:
+
+- **False negatives** (missed emergencies): catastrophic for seizure and acute anomaly detection — user harm
+- **False positives** (spurious alerts): erodes caregiver trust, leads to alert fatigue, and degrades system credibility
+
+The chosen thresholds represent the **minimum-harm operating point** on the precision-recall tradeoff for each model class.
+
+### 0.7 — Soft Alert (Anomaly Detector)
+
+$$s(x, n) > 0.7 \implies \text{Guardian notification via Firebase Cloud Messaging}$$
+
+At this threshold the anomaly is statistically meaningful but not definitively pathological. The caregiver receives a notification with the full biometric snapshot and can dismiss it or escalate. **No autonomous action** is taken at this level. The 0.7 value corresponds approximately to the 95th percentile of the Isolation Forest's score distribution on clean baseline data.
+
+### 0.9 — Emergency Protocol (Anomaly Detector)
+
+$$s(x, n) > 0.9 \implies \texttt{dispatch\_emergency\_protocol()}$$
+
+At this threshold the biometric reading is deeply anomalous relative to the user's personal baseline — a score this high is expected in fewer than 0.1% of normal readings. The protocol is:
+
+1. HollowRover navigates to the user's last-known GPS zone
+2. Emergency contact list is alerted with priority FCM message
+3. Full biometric snapshot archived to `/lifesphere/{device_id}/events/emergency/{timestamp}`
+4. Optional: 911 integration if enabled by the user and caregiver
+
+### 0.85 — Seizure Pre-Dispatch Protocol
+
+$$\hat{y}_{\text{seizure}} > 0.85 \implies \texttt{dispatch\_seizure\_protocol()}$$
+
+The 0.85 threshold maximizes the F1 score on the CHB-MIT validation set, prioritizing **recall** over precision. Missed seizure predictions carry a higher cost than false alarms in this context. The pre-dispatch protocol:
+
+1. HollowRover pre-positions adjacent to the user
+2. Protective cushion deployment mechanism is armed
+3. Caregiver alert dispatched with 30-minute advance warning
+4. Biometric monitoring frequency increases from 5 s to 1 s
+
+### 2-Sigma — Cognitive Decline Alert (CUSUM)
+
+$$|S_t| > 2\sigma \implies \text{Longitudinal cognitive decline alert}$$
+
+The 2-sigma threshold corresponds to a statistically significant sustained deviation from the user's personal cognitive baseline. A single anomalous reading does not trigger an alert — the CUSUM algorithm requires a **pattern of sustained drift**, making it robust to transient variation (illness, sleep deprivation, medication changes).
+
+The 2-sigma threshold yields approximately a **5% false positive rate** under normal operation, assuming a Gaussian cognitive metric distribution. Clinical review is always recommended before acting on a cognitive decline alert.
+
+---
+
+## Hardware Deployment Targets
+
+```
+┌──────────────────────────────────────────────────────────────────────────────┐
+│                        Hardware Deployment Map                               │
+│                                                                              │
+│  ┌───────────────────────────┐    ┌─────────────────────────────────────┐   │
+│  │   Vital32 (ESP32-S3)      │    │   RDK X5 (NPU + CPU)                │   │
+│  │   TFLite Micro Runtime    │    │   TFLite + ONNX Runtime             │   │
+│  │                           │    │                                     │   │
+│  │  • Isolation Forest       │    │  NPU:                               │   │
+│  │    (INT8 TFLite)           │    │    • Whisper STT (small)           │   │
+│  │  • Pre-Seizure LSTM        │    │    • DistilBERT Sentiment          │   │
+│  │    (INT8 TFLite)           │    │    • SphereAI Inference Engine     │   │
+│  │                           │    │                                     │   │
+│  │  30-second tick            │    │  CPU:                               │   │
+│  │  5-second LSTM tick        │    │    • Cortisol Estimator (sklearn)  │   │
+│  │                           │    │    • Biological Age Clock           │   │
+│  │  Flash budget: <1.2 MB     │    │    • Cognitive Tracker (CUSUM)     │   │
+│  │  SRAM: 512 KB + 8 MB PSRAM│    │    • MetaClassifier                │   │
+│  └───────────────────────────┘    └─────────────────────────────────────┘   │
+└──────────────────────────────────────────────────────────────────────────────┘
+```
+
+| Model | Target Hardware | Runtime | Quantization | Model Size |
+|---|---|---|---|---|
+| Anomaly Detector | Vital32 ESP32-S3 | TFLite Micro | INT8 | ~140 KB |
+| Pre-Seizure LSTM | Vital32 ESP32-S3 | TFLite Micro | INT8 | ~380 KB |
+| Whisper STT | RDK X5 NPU | TFLite | FP16 | ~465 MB |
+| DistilBERT | RDK X5 NPU | ONNX Runtime | INT8 | ~67 MB |
+| Emotional Classifier (MetaClassifier) | RDK X5 CPU | scikit-learn native | — | &lt;1 MB |
+| Cortisol Estimator | RDK X5 CPU | scikit-learn native | — | ~2 MB |
+| Biological Age Clock | RDK X5 CPU | XGBoost native | — | ~8 MB |
+| Cognitive Tracker (CUSUM) | RDK X5 CPU | NumPy/SciPy | — | &lt;1 KB |
+
+<Tip>
+  The Vital32 ESP32-S3's combined model budget (Isolation Forest + Seizure LSTM) is approximately **520 KB** of flash after INT8 quantization — comfortably within the 1.2 MB TFLite Micro operational limit. The remaining flash capacity holds the firmware, SPIFFS filesystem, and OTA update partition.
+</Tip>
+
+---
+
+## Personalized Baseline vs. Population Thresholds
+
+<Info>
+  **Why LifeSphere does not use population-level thresholds:**
+
+  Clinical reference ranges (e.g., SpO2 ≥ 95%, resting HR 60–100 bpm) are derived from large population studies and represent averages across diverse individuals. They are appropriate for episodic clinical assessment but are poorly suited to continuous monitoring of individuals with established chronic conditions, atypical physiology, or medicated baselines.
+
+  LifeSphere's models learn *your* normal. An SpO2 of 92% is an emergency for one user and a chronic stable baseline for a COPD patient. A resting HR of 45 bpm indicates sinus bradycardia in a sedentary elderly individual but is unremarkable for a former competitive athlete. By anchoring every threshold to a 30-day personal baseline, LifeSphere achieves **higher sensitivity** (detecting deviations that population thresholds would miss) and **lower false positive rates** (not alarming on values that are normal for you but below population averages).
+
+  This is the central thesis of personalized medicine as applied to continuous autonomous caregiving.
+</Info>
+
+---
+
+## Model Update and Retraining Schedule
+
+| Model | Retraining Trigger | Retraining Duration | Deployed Via |
+|---|---|---|---|
+| Isolation Forest | 30-day initial; annual refresh or on significant lifestyle change | ~2 min (sklearn fit) | OTA flash to Vital32 SPIFFS |
+| Pre-Seizure LSTM | New labeled seizure event added; monthly fine-tune | ~15 min (GPU) | OTA flash to Vital32 SPIFFS |
+| Emotional Classifier (MetaClassifier) | Weekly meta-learner update from accumulated agent output history | ~5 min (sklearn) | RDK X5 model hot-swap |
+| Cortisol Estimator | Quarterly re-fit on updated biometric-cortisol correlation | ~3 min (XGBoost) | RDK X5 model hot-swap |
+| Biological Age Clock | Daily (incremental update of rolling window) | ~10 min (RF + XGBoost) | RDK X5 model hot-swap |
+| Cognitive Tracker (CUSUM) | Continuous (online algorithm; no discrete retraining) | N/A | In-process update |
+
+---
+
+## References
+
+- Liu, F. T., Ting, K. M., & Zhou, Z.-H. (2008). *Isolation Forest*. IEEE ICDM.
+- Hochreiter, S., & Schmidhuber, J. (1997). *Long Short-Term Memory*. Neural Computation.
+- Shoeb, A. H. (2009). *Application of Machine Learning to Epileptic Seizure Onset Detection and Treatment*. MIT PhD Thesis.
+- Radford, A., et al. (2023). *Robust Speech Recognition via Large-Scale Weak Supervision*. ICML.
+- Devlin, J., et al. (2019). *BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding*. NAACL-HLT.
+- Horvath, S. (2013). *DNA methylation age of human tissues and cell types*. Genome Biology, 14(10), R115.
+- Page, E. S. (1954). *Continuous Inspection Schemes*. Biometrika, 41(1/2), 100–115.

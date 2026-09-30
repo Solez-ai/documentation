@@ -1,0 +1,286 @@
+---
+title: 'SphereAI Emotional State Classifier Architecture'
+sidebarTitle: 'Emotional Classifier'
+description: "The trimodal Language-Voice-Biology fusion architecture powering SphereAI emotional state classification, longitudinal cognitive tracking, and Islamic care integration."
+---
+
+
+<Info>
+  The Emotional State Classifier runs on the **RDK X5 NPU** every 15 minutes. It fuses three independent inference agents — Language, Voice, and Biology — through a dynamic MetaClassifier that adjusts its weighting based on the reliability context of each modality.
+</Info>
+
+## Architectural Overview
+
+Emotional state inference from a single modality is brittle. Speech sentiment analysis fails when the user is silent. Physiological signals are ambiguous between anxiety and physical exertion. Voice prosodics change with respiratory illness regardless of emotional state. LifeSphere's solution is a **trimodal fusion architecture** that treats each modality as a soft evidence source and combines them through a learned MetaClassifier with context-adaptive weights.
+
+```
+┌──────────────────────────────────────────────────────────────────────────┐
+│                    SphereAI Emotional Classifier                         │
+│                                                                          │
+│  ┌───────────────────┐  ┌───────────────────┐  ┌──────────────────────┐ │
+│  │   Language Agent  │  │   Voice Agent     │  │   Biology Agent      │ │
+│  │                   │  │                   │  │                      │ │
+│  │  Whisper STT      │  │  Librosa MFCC     │  │  Firebase Listener   │ │
+│  │  DistilBERT       │  │  F0 (pitch)       │  │  /vital32 stream     │ │
+│  │  Cognitive Metrics│  │  Energy / Tempo   │  │  GSR + HRV + Cortisol│ │
+│  │                   │  │  ZCR              │  │  + Heart Rate        │ │
+│  └────────┬──────────┘  └────────┬──────────┘  └──────────┬───────────┘ │
+│           │                      │                         │             │
+│           └──────────────────────┴─────────────────────────┘             │
+│                                  │                                       │
+│                         ┌────────▼────────┐                              │
+│                         │  MetaClassifier │                              │
+│                         │ Dynamic Weights │                              │
+│                         └────────┬────────┘                              │
+│                                  │                                       │
+│                    ┌─────────────▼──────────────┐                        │
+│                    │  Emotional State Label      │                        │
+│                    │  + Confidence Distribution  │                        │
+│                    └────────────────────────────┘                        │
+└──────────────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## Language Agent
+
+### Speech Transcription: Whisper STT
+
+The Language Agent begins with **OpenAI Whisper** (Radford et al., 2023), running the `small` variant on the RDK X5 NPU. Whisper transcribes 15-minute audio segments captured by the SphereAI ambient microphone array into raw text. The `small` model was selected for its balance between transcription accuracy on elderly speech (which often exhibits slower tempo, reduced clarity, and regional accent variation) and NPU inference latency.
+
+### Sentiment and Coherence: DistilBERT
+
+The transcribed text is passed to a **DistilBERT** encoder (Sanh et al., 2019; derived from Devlin et al., 2019 BERT) fine-tuned on a three-class sentiment task:
+
+$$\hat{\mathbf{p}}_{\text{lang}} = \text{softmax}\left(\mathbf{W}_{\text{cls}} \cdot \text{DistilBERT}(\text{tokens}) + \mathbf{b}_{\text{cls}}\right)$$
+
+where $\hat{\mathbf{p}}_{\text{lang}} \in \mathbb{R}^K$ is a probability distribution over $K$ emotional state classes.
+
+### Cognitive Metrics
+
+Beyond sentiment, the Language Agent extracts three structural linguistic features that serve as early markers of **cognitive decline**:
+
+| Metric | Computation | Cognitive Indicator |
+|---|---|---|
+| Unique word ratio | $\frac{\|\text{unique tokens}\|}{\|\text{total tokens}\|}$ | Vocabulary breadth; declines in MCI |
+| Topic repetition count | Cosine similarity between consecutive sentences | Perseveration; pathological repetition |
+| Semantic coherence score | Mean pairwise cosine similarity of sentence embeddings | Thought organization; disrupted in dementia |
+
+These metrics are not used in the real-time emotional state classification directly; instead they are fed into the **Cognitive Tracker** (CUSUM model) for 24-hour longitudinal drift detection.
+
+---
+
+## Voice Agent
+
+The Voice Agent operates on the **raw audio waveform** in parallel with transcription, extracting paralinguistic features using **Librosa** that are independent of semantic content. Critically, the Voice Agent can classify emotional state even when spoken content is ambiguous or uninformative.
+
+### Feature Extraction
+
+```python
+
+def extract_voice_features(audio_path: str, sr: int = 16000) -> np.ndarray:
+    """
+    Extract a 5-component paralinguistic feature vector from a 15-minute
+    audio segment for input to the Voice Agent classifier.
+
+    Returns
+    -------
+    np.ndarray, shape (5,)
+        [mfcc_mean_vec, f0_mean, energy_rms, tempo, zcr_mean]
+        (MFCC compressed to scalar mean across 13 coefficients for illustration)
+    """
+    y, _ = librosa.load(audio_path, sr=sr)
+
+    # Mel-Frequency Cepstral Coefficients: spectral envelope of speech
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+    mfcc_mean = np.mean(mfcc, axis=1)              # shape (13,)
+
+    # Fundamental frequency (pitch): prosodic stress and intonation
+    f0, _, _ = librosa.pyin(y, fmin=60, fmax=400)
+    f0_mean = np.nanmean(f0)                        # Hz
+
+    # Energy (loudness envelope)
+    rms = librosa.feature.rms(y=y)
+    energy = np.mean(rms)                           # RMS amplitude
+
+    # Tempo: speech rate — slowed tempo is a marker of cognitive decline
+    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+
+    # Zero-crossing rate: voiced/unvoiced ratio
+    zcr = librosa.feature.zero_crossing_rate(y)
+    zcr_mean = np.mean(zcr)
+
+    return mfcc_mean, f0_mean, energy, tempo, zcr_mean
+```
+
+### Feature Semantics
+
+| Feature | Library Call | Emotional Relevance |
+|---|---|---|
+| MFCC coefficients | `librosa.feature.mfcc()` | Spectral envelope captures vocal tract configuration; changes with anxiety, depression |
+| Fundamental frequency $f_0$ | `librosa.pyin()` | Pitch elevation in anxiety; monotone delivery in depression |
+| Energy (RMS) | `librosa.feature.rms()` | Reduced loudness in fatigue and depression; elevated in agitation |
+| Tempo | `librosa.beat.beat_track()` | Slowed speech rate correlates with cognitive decline and sedation |
+| Zero-crossing rate | `librosa.feature.zero_crossing_rate()` | Voiced/unvoiced ratio; disrupted in dysarthria and severe fatigue |
+
+The extracted features are passed to a **Random Forest classifier** (100 trees) trained on the RAVDESS emotional speech dataset and fine-tuned on individual user voice samples accumulated over the first 30 days.
+
+---
+
+## Biology Agent
+
+The Biology Agent consumes a continuous **physiological feature stream** from the Firebase Realtime Database listener on `/lifesphere/{device_id}/vital32`:
+
+```python
+from firebase_admin import db
+
+def biology_agent_listener(device_id: str) -> dict:
+    """
+    Subscribe to the Vital32 stream and extract the 4 physiological
+    features used by the Biology Agent for the current 15-minute window.
+    """
+    ref = db.reference(f'/lifesphere/{device_id}/vital32')
+    snapshot = ref.get()
+
+    return {
+        'gsr':           snapshot['gsr'],           # µS
+        'hrv_rmssd':     snapshot['hrv_rmssd'],     # ms
+        'cortisol_est':  snapshot['cortisol_est'],  # ng/dL (Gradient Boost estimate)
+        'heart_rate':    snapshot['heart_rate']     # bpm
+    }
+```
+
+These four features serve as a **continuous physiological ground truth** for emotional state — they cannot be voluntarily masked by the user and are not subject to language or articulatory impairment. The cortisol estimate (from the separate Gradient Boost model) is particularly informative because it directly indexes the HPA axis stress response.
+
+### Isolated State Weighting
+
+When the Language Agent detects **verbal withdrawal** (fewer than 50 tokens transcribed in the 15-minute window, or token rate below the 10th percentile of the user's personal distribution), the MetaClassifier raises the Biology Agent weight to $w_{\text{bio}} = 0.6$:
+
+> *Verbal withdrawal is itself a symptom of the 'isolated' emotional state. When language and voice evidence are sparse, the physiological signal becomes the primary classifier input.*
+
+---
+
+## MetaClassifier: Dynamic Fusion Weights
+
+The MetaClassifier combines the three agent outputs through a **weighted soft voting** scheme with context-adaptive weights $\mathbf{w} = [w_{\text{lang}}, w_{\text{voice}}, w_{\text{bio}}]$, where $\sum_i w_i = 1$:
+
+$$\hat{\mathbf{p}}_{\text{final}} = w_{\text{lang}} \cdot \hat{\mathbf{p}}_{\text{lang}} + w_{\text{voice}} \cdot \hat{\mathbf{p}}_{\text{voice}} + w_{\text{bio}} \cdot \hat{\mathbf{p}}_{\text{bio}}$$
+
+The final predicted state is the **argmax** of this weighted distribution:
+
+$$\hat{y} = \arg\max_k \; \hat{p}_{\text{final},k}$$
+
+### Dynamic Weight Table
+
+| Context Condition | $w_{\text{lang}}$ | $w_{\text{voice}}$ | $w_{\text{bio}}$ |
+|---|---|---|---|
+| Normal (all modalities active) | 0.35 | 0.30 | 0.35 |
+| Verbal withdrawal / isolated state | 0.10 | 0.30 | 0.60 |
+| Voice quality degraded (illness) | 0.40 | 0.10 | 0.50 |
+| Post-seizure (language unreliable) | 0.05 | 0.10 | 0.85 |
+| Ramadan mode (fasting-induced silence) | 0.20 | 0.25 | 0.55 |
+
+<Tip>
+  The dynamic weight table is **not hard-coded**. The MetaClassifier learns these weights from 30 days of baseline data using a small logistic regression meta-learner trained on the three agent outputs and ground-truth emotional state labels (provided via the caregiver app's manual labeling interface during onboarding).
+</Tip>
+
+---
+
+## Longitudinal Cognitive Baseline Modeling
+
+Beyond real-time classification, the Emotional Classifier feeds a **30-day rolling longitudinal model** that builds your personal cognitive baseline. Each 15-minute session contributes:
+
+- Updated unique word ratio moving average $\bar{u}_{30d}$
+- Updated semantic coherence score moving average $\bar{c}_{30d}$
+- Updated topic repetition rate $\bar{r}_{30d}$
+
+The **CUSUM** (Cumulative Sum Control Chart) algorithm monitors for statistically significant deviation from this personal baseline:
+
+$$S_t^+ = \max(0, \; S_{t-1}^+ + (z_t - k))$$
+$$S_t^- = \min(0, \; S_{t-1}^- + (z_t + k))$$
+
+where $z_t$ is the z-scored cognitive metric at time $t$ and $k = 0.5$ is the slack parameter (half the minimum detectable shift). An alert is raised when $|S_t| > h = 2\sigma$, corresponding to a statistically significant sustained shift in cognitive function — not a single anomalous reading.
+
+---
+
+## Islamic Care Integration
+
+LifeSphere is designed with Islamic care principles as first-class system requirements, not as optional add-ons.
+
+### Salah Reminder Module
+
+The salah reminder module integrates with the **Adhan** Python library to compute accurate prayer times based on GPS-derived coordinates and the Umm al-Qura calculation method:
+
+```python
+from adhan import PrayerTimes, Coordinates, CalculationMethod, Date
+
+def get_next_prayer(lat: float, lon: float) -> dict:
+    coords = Coordinates(lat, lon)
+    params = CalculationMethod.UMM_AL_QURA.parameters()
+    times = PrayerTimes(coords, Date.today(), params)
+    return {
+        'fajr':    times.fajr,
+        'dhuhr':   times.dhuhr,
+        'asr':     times.asr,
+        'maghrib': times.maghrib,
+        'isha':    times.isha
+    }
+```
+
+Prayer reminders are contextualized with the user's current stress level from the emotional classifier:
+
+- If `stress_level > 0.7`: SphereAI provides a calm, abbreviated reminder paired with a **dhikr audio prompt** (e.g., *Astaghfirullah*, *SubhanAllah*) — clinical literature supports repetitive structured vocalization as a parasympathetic activator
+- If the user is in the `isolated` state near prayer time: HollowRover physically navigates to the user's location to provide a gentle audible adhan
+
+### Adhkar Playback
+
+When `stress_level > 0.7` (as determined by the MetaClassifier output confidence on the `stressed/anxious` class), SphereAI initiates **adhkar playback** — curated recordings of Quranic recitation and dhikr — through the HollowRover's speaker system or smart home audio integration. This is not a superficial feature: it represents LifeSphere's acknowledgment that **spiritual care is a quantifiable component of wellbeing** for Muslim users.
+
+### Ramadan Mode
+
+During Ramadan (detected via the Islamic calendar module), several system parameters are recalibrated:
+
+| Parameter | Normal Mode | Ramadan Mode |
+|---|---|---|
+| Medication reminder windows | Based on circadian model | Shifted to Suhoor/Iftar boundaries |
+| Hydration alerts | Continuous | Suspended during fasting hours; intensified post-Iftar |
+| Cortisol threshold for alert | Personal baseline | Elevated threshold (fasting-induced cortisol increase expected) |
+| Emotional classifier weight | Standard | Biology Agent weight increased (hunger may suppress speech) |
+| Calorie/nutrition tracking | Continuous | Aggregated across Suhoor and Iftar windows only |
+
+<Warning>
+  Ramadan mode activation requires explicit confirmation from the user or authorized caregiver via the LifeSphere mobile app. The system does not infer Ramadan observance automatically from the Islamic calendar — individual practice varies.
+</Warning>
+
+---
+
+## Firebase Output Schema
+
+```json
+{
+  "/lifesphere/{device_id}/sphereai/emotional": {
+    "state": "calm",
+    "confidence": 0.81,
+    "stress_level": 0.22,
+    "isolated_flag": false,
+    "cognitive_drift_score": 0.43,
+    "cognitive_alert": false,
+    "timestamp": 1718000000,
+    "agent_weights": {
+      "language": 0.35,
+      "voice": 0.30,
+      "biology": 0.35
+    }
+  }
+}
+```
+
+---
+
+## References
+
+- Radford, A., et al. (2023). *Robust Speech Recognition via Large-Scale Weak Supervision*. ICML 2023. (Whisper)
+- Devlin, J., et al. (2019). *BERT: Pre-training of Deep Bidirectional Transformers for Language Understanding*. NAACL-HLT.
+- Sanh, V., et al. (2019). *DistilBERT, a distilled version of BERT*. EMC2 Workshop, NeurIPS.
+- McFee, B., et al. (2015). *librosa: Audio and Music Signal Analysis in Python*. Proceedings of the 14th Python in Science Conference.
+- Page, E. S. (1954). *Continuous Inspection Schemes*. Biometrika, 41(1/2), 100–115. (CUSUM)

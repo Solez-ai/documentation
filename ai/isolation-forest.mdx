@@ -1,0 +1,229 @@
+---
+title: 'Isolation Forest Anomaly Detection in Vital32'
+sidebarTitle: 'Isolation Forest'
+description: "How LifeSphere personalizes its Isolation Forest model to score real-time biometric anomalies on the Vital32 ESP32 using 30 days of your own baseline data."
+---
+
+
+<Info>
+  The Isolation Forest runs **entirely on the Vital32 ESP32** as a TFLite Micro model. It produces an anomaly score every 30 seconds and is trained exclusively on **your own** biometric baseline — never on population-level reference distributions.
+</Info>
+
+## Purpose and Design Rationale
+
+The Isolation Forest is LifeSphere's first line of defense: a continuous, personalized anomaly scorer that evaluates your current physiological state against the statistical structure of your own healthy baseline. It answers a single question every 30 seconds:
+
+> *Given what is normal for this specific user, how anomalous is the current biometric reading?*
+
+The algorithm was introduced by Liu, Ting & Zhou (2008) and is particularly well-suited to real-time edge deployment because:
+
+- It requires **no distance metric** (unlike k-NN or LOF), making it $O(\log n)$ at inference time
+- Its memory footprint scales with the number of trees, not the training set size — critical for an ESP32 with 512 KB SRAM
+- It is **non-parametric**: it makes no assumption about the underlying distribution of your biometrics, which is essential given the high inter-individual variability in elderly physiology
+
+---
+
+## Algorithm: Recursive Random Partitioning
+
+The Isolation Forest builds an ensemble of $T$ **isolation trees**, each constructed by:
+
+1. Randomly selecting a feature $q$ from the feature vector $\mathbf{x} \in \mathbb{R}^d$
+2. Randomly selecting a split point $p$ uniformly from $[\min(q), \max(q)]$
+3. Recursively partitioning the data until each leaf node contains exactly one point or a maximum tree height $\ell_{\max} = \lceil \log_2(n) \rceil$ is reached
+
+A point that is **anomalous** is structurally isolated from the main cluster and therefore requires **fewer splits** to isolate — its average path length $h(x)$ across the ensemble is short.
+
+### Anomaly Score Formula
+
+The anomaly score is defined as:
+
+$$s(x, n) = 2^{-\dfrac{E[h(x)]}{c(n)}}$$
+
+where $E[h(x)]$ is the expected path length averaged across all $T$ trees, and $c(n)$ is the normalization factor equal to the expected path length of an unsuccessful binary search in a dataset of size $n$:
+
+$$c(n) = 2H(n-1) - \frac{2(n-1)}{n}, \qquad H(n) = \ln(n) + 0.5772156649$$
+
+The constant $0.5772156649$ is the **Euler–Mascheroni constant** $\gamma$.
+
+**Score interpretation:**
+
+| Score Range | Interpretation |
+|---|---|
+| $s \approx 1.0$ | Point is highly anomalous; very short path length |
+| $s \approx 0.5$ | Ambiguous; indistinguishable from training distribution |
+| $s \approx 0.0$ | Point is deeply embedded in the normal cluster |
+
+### Threshold Semantics
+
+LifeSphere applies two thresholds to the continuous anomaly score:
+
+$$s > 0.7 \implies \text{soft alert} \quad \longrightarrow \quad \text{guardian notification (FCM)}$$
+
+$$s > 0.9 \implies \text{emergency protocol} \quad \longrightarrow \quad \texttt{dispatch\_emergency\_protocol()}$$
+
+At $s > 0.9$, the HollowRover autonomous rover is dispatched to the user's last-known location, and emergency contacts are alerted via Firebase Cloud Messaging with a full biometric snapshot.
+
+<Warning>
+  The two thresholds are **not independent**. Any reading that crosses 0.9 has already crossed 0.7. The emergency path short-circuits the guardian notification and initiates autonomous response immediately.
+</Warning>
+
+---
+
+## Feature Vector
+
+Every 30-second inference consumes a 7-dimensional normalized feature vector assembled from the Vital32 sensor array:
+
+$$\mathbf{x} = \begin{bmatrix} h_r & s_{O_2} & \text{HRV}_{\text{rmssd}} & \text{HRV}_{LF/HF} & \text{GSR} & T_{\text{skin}} & Z_{\text{BIA}} \end{bmatrix}^{\top} \in \mathbb{R}^7$$
+
+| Index | Feature | Sensor | Unit |
+|---|---|---|---|
+| 0 | Heart rate $h_r$ | MAX30102 PPG | bpm |
+| 1 | Blood oxygen $s_{O_2}$ | MAX30102 PPG | % |
+| 2 | HRV RMSSD | Derived from RR intervals | ms |
+| 3 | HRV LF/HF ratio | Spectral decomposition of RR | dimensionless |
+| 4 | Galvanic skin response (GSR) | Grove GSR sensor | µS |
+| 5 | Skin temperature $T_{\text{skin}}$ | MLX90614 IR | °C |
+| 6 | BIA impedance $Z_{\text{BIA}}$ | AD5933 BIA module | Ω |
+
+Each feature is **z-score normalized** against the statistics accumulated during the 30-day baseline period:
+
+$$\tilde{x}_i = \frac{x_i - \mu_i^{\text{baseline}}}{\sigma_i^{\text{baseline}}}$$
+
+This normalization ensures the Isolation Forest operates on a standardized feature space and is not dominated by features with large absolute ranges (e.g., BIA impedance in hundreds of ohms vs. SpO2 in the range 90–100%).
+
+---
+
+## Contamination Parameter
+
+The `contamination=0.05` hyperparameter informs the model that approximately **5% of the baseline training data** is expected to be physiologically anomalous. This accounts for:
+
+- Transient biological noise (sensor movement artifacts, post-exercise readings)
+- Short illness episodes during the 30-day collection window
+- Circadian extremes at the tails of the normal distribution
+
+Setting contamination too low (e.g., 0.01) causes the decision boundary to absorb genuine anomalies into the normal region. Setting it too high increases false-positive rates. At 0.05 this parameter is conservative but grounded in clinical literature on biometric noise prevalence in wearable sensing.
+
+---
+
+## Training Code
+
+```python
+from sklearn.ensemble import IsolationForest
+
+def train_isolation_forest(baseline_data: np.ndarray) -> IsolationForest:
+    """
+    Train a personalized Isolation Forest on 30 days of user baseline data.
+
+    Parameters
+    ----------
+    baseline_data : np.ndarray, shape (N, 7)
+        Normalized biometric feature vectors collected during the 30-day
+        baseline period. N is typically ~86,400 (one 30s sample per half-minute
+        over 30 days).
+
+    Returns
+    -------
+    IsolationForest
+        Fitted model ready for anomaly scoring.
+    """
+    model = IsolationForest(
+        n_estimators=100,       # 100 isolation trees
+        max_samples='auto',     # subsample size = min(256, N)
+        contamination=0.05,     # 5% of baseline assumed anomalous
+        random_state=42
+    )
+    model.fit(baseline_data)
+    return model
+
+
+def get_anomaly_score(model: IsolationForest, sample: np.ndarray) -> float:
+    """
+    Compute the normalized anomaly score for a single biometric sample.
+
+    The scikit-learn score_samples() method returns the negative average
+    log-likelihood; values range from approximately -0.5 (normal) to 0.5
+    (anomalous). We remap to [0, 1] for interpretability.
+
+    Parameters
+    ----------
+    model : IsolationForest
+        Fitted Isolation Forest model.
+    sample : np.ndarray, shape (7,)
+        Single normalized biometric feature vector.
+
+    Returns
+    -------
+    float
+        Anomaly score in [0, 1]. Higher values indicate greater anomaly.
+    """
+    raw_score = model.score_samples([sample])[0]
+    return float(1 - (raw_score + 0.5))  # remap to [0, 1]
+```
+
+<Tip>
+  `score_samples()` returns values in approximately $[-0.5, 0.5]$ where more negative values indicate greater anomaly. The remapping `1 - (raw + 0.5)` converts this to $[0, 1]$ with 1 corresponding to maximum anomaly — consistent with the threshold semantics used throughout the LifeSphere alerting system.
+</Tip>
+
+---
+
+## 30-Day Baseline Collection Period
+
+The Isolation Forest **cannot be activated until 30 days of baseline data have been collected**. During this period:
+
+- All sensor data is written to Firebase under `/lifesphere/{device_id}/baseline/{timestamp}`
+- The `anomaly_score` field in the live stream is set to `null`
+- No alerts are raised regardless of sensor readings
+- On day 31, the training function above is invoked server-side; the resulting model is converted to TFLite INT8 format and OTA-flashed to the Vital32
+
+The 30-day window is a deliberate tradeoff between personalization fidelity and time-to-protection. Shorter windows (e.g., 7 days) yield models that are more sensitive to circadian variation and less robust to natural biological fluctuation. Longer windows (e.g., 60 days) delay protection unnecessarily for new users.
+
+---
+
+## TFLite Conversion and Deployment
+
+After training, the scikit-learn model is exported via the `sklearn-onnx` toolchain and wrapped in a TFLite-compatible inference shim:
+
+```python
+from onnxmltools.convert import convert_sklearn
+from skl2onnx.common.data_types import FloatTensorType
+
+# Convert to ONNX
+initial_type = [('float_input', FloatTensorType([None, 7]))]
+onnx_model = convert_sklearn(isolation_forest_model, initial_types=initial_type)
+
+# Save and deploy via OTA to Vital32 SPIFFS
+with open('isolation_forest.onnx', 'wb') as f:
+    onnx_model.SerializeToString()
+```
+
+The deployed model inference on the ESP32 runs through the TFLite Micro interpreter at every 30-second scheduler tick, consuming approximately **18 ms** of CPU time on the dual-core ESP32-S3 at 240 MHz.
+
+---
+
+## Firebase Output Schema
+
+```json
+{
+  "/lifesphere/{device_id}/vital32": {
+    "anomaly_score": 0.42,
+    "immune_alert": false,
+    "alert_level": "none",
+    "timestamp": 1718000000
+  }
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `anomaly_score` | `float [0,1]` | Raw isolation forest output for this 30s window |
+| `immune_alert` | `bool` | `true` if `anomaly_score > 0.7` |
+| `alert_level` | `enum` | `"none"` / `"soft"` / `"emergency"` |
+| `timestamp` | `int` | Unix epoch of the inference tick |
+
+---
+
+## References
+
+- Liu, F. T., Ting, K. M., & Zhou, Z.-H. (2008). *Isolation Forest*. IEEE International Conference on Data Mining (ICDM).
+- Breunig, M. M., et al. (2000). *LOF: Identifying Density-Based Local Outliers*. SIGMOD.
+- TensorFlow Lite Micro documentation: [tensorflow.org/lite/microcontrollers](https://www.tensorflow.org/lite/microcontrollers)

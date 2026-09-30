@@ -1,0 +1,143 @@
+---
+title: 'HollowCore Biometric-to-Environment Mapping Logic'
+sidebarTitle: 'Biometric Automation'
+description: 'HollowCore reads the shared physiological state object and maps each measured parameter to a deterministic relay or MQTT environment response.'
+---
+
+The biometric automation loop is HollowCore's primary execution path. It reads the shared `/lifesphere/vital32` Firebase object on a 500 ms polling cycle and evaluates each physiological parameter against a set of compiled threshold constants. When a threshold is crossed, the loop immediately asserts the corresponding relay state or publishes an MQTT command — no cloud round-trip, no inference latency. The response is deterministic and local.
+
+This architecture treats the home as an extension of the body's own regulatory systems. When cortisol climbs, the environment becomes calmer. When oxygen saturation drops, air quality improves. When the occupant enters sleep, the home locks down and quiets. The occupant does not need to act — the home acts on their behalf.
+
+---
+
+## Mapping Table
+
+| Trigger | Parameter | Threshold | Environment Response |
+|---|---|---|---|
+| Stress elevation | `cortisol_est` | > 18.0 ng/dL | Warm dim lighting + lower AC setpoint |
+| Acute anxiety | `gsr` | > 0.6 | Calming audio via SphereAI speaker |
+| Hypoxia risk | `spo2` | < 94.0% | Air purifier relay ON |
+| Sleep onset | HRV RMSSD + accelerometer immobility | — | All lights OFF + door lock LOCKED |
+| Cold stress | `skin_temp` | < 35.5°C | Raise AC thermostat setpoint |
+
+All threshold constants are defined in the firmware at compile time. Field updates to threshold values require a firmware reflash — this is by design, preventing threshold drift from remote configuration attacks.
+
+---
+
+## Implementation
+
+```cpp
+void loop() {
+  if (Firebase.getJSON(fbdo, "/lifesphere/vital32")) {
+    float cortisol    = fbdo.jsonObject()["cortisol_est"];
+    float skinTemp    = fbdo.jsonObject()["skin_temp"];
+    float spo2        = fbdo.jsonObject()["spo2"];
+    float gsr         = fbdo.jsonObject()["gsr"];
+    bool sleepDetected = isSleepState(hrData, accelData);
+
+    if (cortisol > 18.0) {
+      setRelay("light_1", WARM_DIM);   // warm lighting to calm
+      setRelay("ac", LOWER_TEMP);      // cooler environment
+    }
+
+    if (gsr > 0.6) {
+      mqttPublish("sphereai/command", "play_calming_audio");
+    }
+
+    if (spo2 < 94.0) {
+      setRelay("air_purifier", ON);
+    }
+
+    if (sleepDetected) {
+      setRelay("light_1", OFF); setRelay("light_2", OFF);
+      setRelay("door_lock", LOCKED);
+    }
+
+    if (skinTemp < 35.5) {
+      setRelay("ac", RAISE_TEMP);
+    }
+  }
+}
+```
+
+`setRelay()` resolves the device name to its GPIO pin, asserts the relay output, and confirms state via a brief read-back before returning. `mqttPublish()` wraps a QoS 1 publish to the broker on the RDK X5 — SphereAI's voice hardware subscribes to `sphereai/command` and handles audio playback independently.
+
+---
+
+## Sleep Detection
+
+Sleep detection is the most compositionally complex trigger in the mapping table, because no single sensor reliably distinguishes sleep from calm wakefulness. HollowCore uses a two-signal conjunction:
+
+**HRV RMSSD elevation** — the root mean square of successive RR interval differences is computed from the Vital32 ECG stream. RMSSD rises during parasympathetic dominance, which accompanies both sleep onset and deep rest. A sustained RMSSD elevation above a baseline threshold is necessary but not sufficient for a sleep classification.
+
+**MPU6050 accelerometer immobility** — the MPU6050 on the Vital32 wearable streams 3-axis acceleration. The firmware computes the vector magnitude:
+
+$$
+|\mathbf{a}| = \sqrt{a_x^2 + a_y^2 + a_z^2}
+$$
+
+A magnitude consistently below **1.1g** for a sustained window (default: 90 seconds) indicates postural immobility consistent with recumbent rest. The 1.1g threshold accounts for gravitational baseline (≈1.0g) plus a 0.1g margin for minor positional micro-movements during light sleep.
+
+```cpp
+bool isSleepState(HRVData hrData, AccelData accelData) {
+  bool hrvsElevated = hrData.rmssd > HRV_SLEEP_THRESHOLD;
+  bool immobile     = accelData.magnitude < 1.1f
+                      && accelData.sustained_seconds >= 90;
+  return hrvsElevated && immobile;
+}
+```
+
+Only when both conditions hold simultaneously does `isSleepState()` return `true`. This conjunction requirement prevents false sleep classifications during quiet seated activity (high RMSSD but upright accel) or sudden postural immobility without physiological rest markers (immobile but low RMSSD).
+
+---
+
+## SphereAI Audio Integration
+
+When `gsr` exceeds 0.6 — the threshold associated with acute sympathetic arousal and anxiety — HollowCore publishes to the SphereAI command topic rather than actuating a relay:
+
+```
+Topic:   sphereai/command
+Payload: play_calming_audio
+```
+
+SphereAI's voice hardware receives this command on its MQTT subscription and selects from a curated library of low-frequency, slow-tempo audio content calibrated for parasympathetic induction. The selection logic within SphereAI is independent of HollowCore — HollowCore issues the command; SphereAI determines the content. This decoupling means audio content can be updated on the SphereAI side without touching HollowCore firmware.
+
+---
+
+## Medication Dispenser HMI
+
+The medication dispenser is controlled through a dedicated touchscreen interface mounted on HollowRover's chassis — a **3.5-inch ILI9488 TFT LCD** at **480×320 resolution**, driven by the same ESP32 WROOM-32 that manages the dispenser's servo and relay outputs. Touch input is handled by an **XPT2046 resistive touch controller** sharing the SPI bus with the display.
+
+The UI is rendered using the **TFT_eSPI** library, which runs entirely on the ESP32 — no framebuffer is offloaded to an external display controller. TFT_eSPI's direct register writes to the ILI9488 achieve frame render times suitable for a touch-responsive interface without an RTOS.
+
+The dispenser HMI exposes two interaction modes:
+
+<AccordionGroup>
+  <Accordion title="Scheduled Dispensing View">
+    Displays the upcoming medication schedule loaded from Firebase — medication name, slot index, scheduled time, and dose. A countdown timer shows time to next dispense. The occupant or caregiver can acknowledge a dispensed dose directly from this screen, which writes a confirmation timestamp to `/lifesphere/hollowrover/dispenser_log`.
+  </Accordion>
+  <Accordion title="Manual Override">
+    An authorized caregiver can trigger an immediate dispense from any slot, or record a manually administered dose. Manual schedule changes made on the HMI are relayed to Firebase at `/lifesphere/hollowcore/dispenser_manual`, where they are picked up by the prescription management backend and reconciled against the active medication plan. No manual change takes effect without this Firebase write — the HMI is not the source of truth; Firebase is.
+  </Accordion>
+</AccordionGroup>
+
+<Note>
+  Manual schedule changes made on the HMI are not applied locally until Firebase confirms the write. If the RDK X5 loses connectivity, the HMI enters a read-only degraded mode and queues pending changes for upload on reconnect.
+</Note>
+
+The `dispenser_manual` Firebase path:
+
+```json
+{
+  "lifesphere": {
+    "hollowcore": {
+      "dispenser_manual": {
+        "slot": 2,
+        "action": "dispense_now",
+        "authorized_by": "caregiver_uid_abc",
+        "timestamp": 1718200500
+      }
+    }
+  }
+}
+```

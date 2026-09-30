@@ -1,0 +1,186 @@
+---
+title: 'SphereAI: Trimodal Emotional Intelligence for LifeSphere'
+sidebarTitle: 'Overview'
+description: "SphereAI is LifeSphere affective computing layer — fusing language, voice, and biological signals to model emotional and cognitive states in real time."
+---
+
+
+<Info>
+  SphereAI operates as a continuously active affective layer on the HollowRover's RDK X5 processor. It does **not** require continuous cloud connectivity — wake-word detection runs entirely on the embedded ESP32-S3.
+</Info>
+
+## What SphereAI Is
+
+SphereAI is the emotional intelligence engine of the LifeSphere ecosystem. It implements a **TriAgent architecture** in which three concurrent processing agents — Language, Voice, and Biology — each independently analyze a distinct modality of the care recipient's affective state. A **MetaClassifier** then fuses their probability distributions using dynamic weights conditioned on the person's prior emotional state, producing a single authoritative classification.
+
+This design reflects a core insight in affective computing: no single modality is sufficient. Language can be deliberately controlled. Vocal acoustics betray stress even when words do not. Biological signals reveal physiological load regardless of whether the person speaks at all. The TriAgent architecture exploits all three channels simultaneously and weighs them intelligently based on what the current emotional context suggests will be most reliable.
+
+```
+┌─────────────────────────────────────────────────────────┐
+│                     SphereAI Core                       │
+│                                                         │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐  │
+│  │  Language    │  │    Voice     │  │   Biology    │  │
+│  │    Agent     │  │    Agent     │  │    Agent     │  │
+│  │              │  │              │  │              │  │
+│  │ Whisper STT  │  │ Librosa MFCC │  │  Vital32     │  │
+│  │ DistilBERT   │  │ Pitch/Energy │  │  Firebase    │  │
+│  └──────┬───────┘  └──────┬───────┘  └──────┬───────┘  │
+│         │                 │                 │           │
+│         └─────────────────┼─────────────────┘           │
+│                           ▼                             │
+│                  ┌─────────────────┐                    │
+│                  │ MetaClassifier  │                    │
+│                  │ (prior-weighted │                    │
+│                  │   fusion)       │                    │
+│                  └────────┬────────┘                    │
+│                           ▼                             │
+│              emotional_state, stress_level,             │
+│              loneliness_index, cognitive_score          │
+└─────────────────────────────────────────────────────────┘
+```
+
+---
+
+## The Three Agents
+
+### Language Agent
+
+The Language Agent transcribes live speech via **OpenAI Whisper** (running on the RDK X5) and passes the resulting transcript to a **DistilBERT** NLP pipeline fine-tuned for sentiment analysis. Beyond sentiment polarity, the agent extracts cognitive markers: unique word ratio, topic repetition frequency, and semantic coherence score. These features form the primary signal for early cognitive decline detection — degradation in lexical diversity and coherence often precedes clinical assessment by months.
+
+| Feature | Method | Cognitive Relevance |
+|---|---|---|
+| Sentiment polarity | DistilBERT fine-tuned | Emotional valence |
+| Unique word ratio | Lexical diversity metric | Early dementia marker |
+| Topic repetition | Sliding-window similarity | Short-term memory indicator |
+| Semantic coherence | Sentence embedding cosine similarity | Thought organization |
+
+### Voice Agent
+
+The Voice Agent operates on the raw audio waveform captured by the INMP441 I2S microphone — independently of what words were spoken. It extracts a rich acoustic feature set using **Librosa**:
+
+- **MFCC coefficients** — encode the spectral envelope of the vocal tract; stable under linguistic content variation
+- **Fundamental pitch (f0)** — elevated pitch correlates with anxiety; flattened pitch with depression or dissociation
+- **Short-time energy** — volume envelope reveals subdued or agitated speech patterns
+- **Tempo** — speech rate is a sensitive indicator of cognitive and emotional arousal state
+- **Zero-crossing rate** — discriminates voiced from unvoiced segments; elevated ZCR indicates breathiness associated with distress
+
+### Biology Agent
+
+The Biology Agent reads live biomarker telemetry from the **Vital32 wearable** via Firebase Realtime Database at `/lifesphere/vital32`. Four biomarkers are consumed:
+
+| Firebase Key | Signal | Emotional Relevance |
+|---|---|---|
+| `gsr` | Galvanic skin response (µS) | Sympathetic arousal, stress |
+| `hrv_rmssd` | Heart rate variability (ms) | Parasympathetic tone, emotional regulation |
+| `cortisol_est` | Estimated cortisol proxy | Chronic stress, HPA-axis load |
+| `heart_rate` | BPM | Autonomic state, exertion, anxiety |
+
+The Biology Agent is the most noise-resistant of the three — it cannot be suppressed by deliberate linguistic or vocal control and remains informative even when the resident is silent.
+
+---
+
+## The MetaClassifier
+
+The MetaClassifier does not apply fixed equal weights to the three agents. Instead, it selects a weight vector conditioned on the **prior emotional state** — the state inferred in the most recent inference cycle. This reflects the empirical observation that different states render different modalities more or less reliable:
+
+| Prior State | Language | Voice | Biology | Rationale |
+|---|---|---|---|---|
+| `calm` | 0.4 | 0.3 | 0.3 | Balanced — all modalities reliable |
+| `stressed` | 0.2 | 0.3 | 0.5 | Physiological load most diagnostic |
+| `grief` | 0.3 | 0.4 | 0.3 | Vocal prosody most expressive in grief |
+| `isolated` | 0.2 | 0.2 | 0.6 | Verbal withdrawal suppresses language/voice; biology persists |
+| `cognitive` | 0.5 | 0.3 | 0.2 | Linguistic markers most sensitive to cognitive state |
+
+Fusion runs on a **15-minute medium cycle**, writing the resolved state to Firebase at `/lifesphere/sphereai`. Faster alerting (e.g. acute distress) is handled by threshold rules on Biology Agent outputs directly.
+
+---
+
+## Capabilities
+
+<AccordionGroup>
+  <Accordion title="Early Cognitive Decline Detection">
+    By longitudinally tracking the Language Agent's lexical diversity and semantic coherence scores, SphereAI can detect gradual drift in cognitive function before it manifests in activities of daily living. Scores are trended over weeks and surfaced to caregivers via the HollowCore dashboard. A declining trajectory triggers escalated sampling and caregiver notification — not a one-shot classification.
+  </Accordion>
+
+  <Accordion title="Longitudinal Emotional State Modeling">
+    SphereAI maintains a rolling emotional history in Firebase. Over time, this reveals circadian patterns (typical morning anxiety, post-meal calm), day-of-week periodicity, and response to interventions. Caregivers and clinicians can review emotional timelines rather than point-in-time snapshots. The system models **drift** — slow shifts in baseline — as distinct from **acute episodes**.
+  </Accordion>
+
+  <Accordion title="Companionship and Engagement">
+    SphereAI drives the conversational layer of the HollowRover. Detected emotional states influence response tone, topic selection, and proactive engagement frequency. A `loneliness_index` above threshold triggers unprompted conversation initiation by the rover — not scripted responses, but contextually appropriate engagement informed by the resident's interaction history.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Islamic Integration Framework
+
+SphereAI includes a first-class Islamic integration layer, not as an add-on but as an architectural concern treated at the same level as clinical functionality.
+
+<Tabs>
+  <Tab title="Salah Reminders">
+    Prayer time reminders are issued through the SphereAI voice interface with awareness of the resident's current emotional and cognitive state. During elevated stress or grief, reminders are delivered with a softer, unhurried tone and may be paired with a brief calming phrase. During cognitive assessment periods, reminders include gentle orientation cues (day, time, prayer name).
+  </Tab>
+
+  <Tab title="Stress-Triggered Adhkar">
+    When the Biology Agent detects elevated GSR and suppressed HRV — the physiological signature of acute stress — SphereAI initiates an adhkar (remembrance) session via the MAX98357A speaker. Specific invocations (e.g., *Hasbunallahu wa ni'mal wakeel*) are selected for their established role in cognitive reappraisal of stressful events. This is not a generic relaxation audio track — it is triggered by a quantitative biomarker threshold.
+  </Tab>
+
+  <Tab title="Ramadan Mode">
+    Ramadan mode restructures medication and hydration protocols around fasting intervals. SphereAI ingests the local Hijri calendar and computed Fajr/Maghrib times to define the fasting window dynamically. Medication reminders are rescheduled to Suhoor and Iftar boundaries. Hydration prompts are suppressed during the fasting period and intensified in the window between Iftar and Fajr. Cortisol and HRV baselines are recalibrated to account for expected physiological shifts during Ramadan.
+  </Tab>
+</Tabs>
+
+---
+
+## Always-Listening Wake-Word
+
+SphereAI does not stream audio continuously to cloud services or consume the RDK X5's compute with perpetual full-pipeline speech processing. Instead, an **ESP32-S3** microcontroller runs the **ESP-SR** lightweight wake-word detection model locally and continuously. The ESP32-S3 draws minimal power in this mode.
+
+On wake-word detection, the ESP32-S3 signals the RDK X5 via **UART at 115,200 baud**, and the RDK X5 activates the full Whisper STT pipeline and TriAgent inference cycle. This architecture means the privacy-sensitive audio processing occurs only when explicitly triggered and remains on-device.
+
+```
+ESP32-S3 (always on, low power)
+    │  ESP-SR wake-word model
+    │  "Hey Sphere" detected
+    │
+    ▼  UART TX → RDK X5 UART RX
+RDK X5
+    │  Activates Whisper STT
+    │  Activates Voice Agent (Librosa)
+    │  Reads Biology Agent (Firebase)
+    ▼
+  MetaClassifier → Firebase /lifesphere/sphereai
+```
+
+---
+
+## Privacy and Ethical Boundaries
+
+<Warning>
+  The **Personality Mirror** feature — which would have constructed a replicable model of the resident's personality from interaction history — was **removed from SphereAI on ethical grounds** prior to deployment.
+</Warning>
+
+SphereAI does learn from interaction history. It adapts response tone, topic preferences, and scheduling patterns to individual residents. This constitutes **personalization for care quality improvement**. It does not construct, store, or expose a replicable personality profile. The distinction is consequential: a system that learns how to better serve you is categorically different from one that learns how to simulate you. LifeSphere's position is that the latter creates risks — of exploitation, of identity commodification, of grief manipulation — that are incompatible with the trust relationship between a caregiving system and a vulnerable person.
+
+---
+
+## Explore SphereAI
+
+<CardGroup cols={2}>
+  <Card
+    title="TriAgent Fusion & MetaClassifier"
+    icon="brain-circuit"
+    href="/sphereai/triagent-fusion"
+  >
+    Detailed fusion logic, dynamic weight rationale, exact MetaClassifier implementation, and Firebase output schema.
+  </Card>
+  <Card
+    title="Voice Hardware"
+    icon="microphone"
+    href="/sphereai/voice-hardware"
+  >
+    Complete voice I/O chain: INMP441 microphone, MAX98357A amplifier, ESP32-S3 wake-word engine, and I2S routing.
+  </Card>
+</CardGroup>

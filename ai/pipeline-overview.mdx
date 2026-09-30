@@ -1,0 +1,165 @@
+---
+title: 'LifeSphere AI Pipeline: Multi-Timescale Inference Architecture'
+sidebarTitle: 'Pipeline Overview'
+description: "A technical deep-dive into the LifeSphere three-timescale autonomous inference pipeline, from 30-second anomaly scoring to 24-hour biological age estimation."
+---
+
+
+<Info>
+  All LifeSphere AI models are trained **offline** on user-specific data and deployed as **TensorFlow Lite** binaries on their respective target hardware — either the Vital32 ESP32 microcontroller or the RDK X5 NPU. No inference occurs in the cloud; every inference loop runs at the edge.
+</Info>
+
+## Architectural Philosophy
+
+Most remote health monitoring systems evaluate a user against **population-level thresholds** derived from clinical studies. LifeSphere takes a fundamentally different stance: **you are your own control group**. Every model in the pipeline learns from your personal physiological baseline and raises alerts only when *you* deviate from *your* norm — not when you cross a statistically averaged population boundary.
+
+This distinction is not cosmetic. Pathological baselines are common in elderly and chronically ill populations; a resting heart rate of 58 bpm is unremarkable for an athlete but may indicate sinus bradycardia for a sedentary 80-year-old. Normalizing to the individual eliminates entire classes of false positives while dramatically increasing sensitivity to genuine personal deviations.
+
+---
+
+## Multi-Timescale Inference
+
+The LifeSphere AI pipeline operates across **three simultaneous inference timescales**, each targeting a different physiological phenomenon and temporal resolution. These loops run concurrently and are orchestrated by the firmware scheduler on the Vital32 and the SphereAI runtime on the RDK X5.
+
+```
+┌─────────────────────────────────────────────────────────────────────┐
+│                   LifeSphere AI Inference Pipeline                  │
+│                                                                     │
+│  ┌─────────────┐   ┌──────────────────┐   ┌──────────────────────┐ │
+│  │  Short Cycle │   │  Medium Cycle    │   │  Long Cycle          │ │
+│  │    30 s      │   │    15 min        │   │    24 h              │ │
+│  │             │   │                  │   │                      │ │
+│  │ Isolation   │   │ Emotional State  │   │ Biological Age Clock │ │
+│  │ Forest      │   │ Classifier       │   │ Cognitive Baseline   │ │
+│  │ Seizure     │   │ Cortisol         │   │ Circadian Rhythm     │ │
+│  │ LSTM (5s)   │   │ Estimator        │   │ Model                │ │
+│  └──────┬──────┘   └────────┬─────────┘   └──────────┬───────────┘ │
+│         │                  │                         │             │
+│         └──────────────────┴─────────────────────────┘             │
+│                             │                                       │
+│                    Firebase Realtime DB                             │
+│              /lifesphere/{device_id}/{stream}                       │
+└─────────────────────────────────────────────────────────────────────┘
+```
+
+### Short-Cycle Inference — 30 Seconds
+
+The short cycle operates on the Vital32 ESP32 at every 30-second firmware tick. Raw sensor readings are assembled into a normalized biometric **feature vector** of dimensionality 7:
+
+$$\mathbf{x} = [\, h_r,\; s_{O_2},\; \text{HRV}_{\text{rmssd}},\; \text{HRV}_{LF/HF},\; \text{GSR},\; T_{\text{skin}},\; Z_{\text{BIA}} \,] \in \mathbb{R}^7$$
+
+This vector is passed to the **Isolation Forest** anomaly detector. The output is a continuous anomaly score $s(x, n) \in [0, 1]$, with two threshold semantics:
+
+- $s > 0.7$: **Soft alert** — guardian notification dispatched via Firebase Cloud Messaging
+- $s > 0.9$: **Emergency protocol** — `dispatch_emergency_protocol()` invoked; HollowRover navigates to user location
+
+The **Pre-Seizure LSTM** runs on a tighter 5-second rolling window within the same hardware tick, consuming HRV, accelerometer, skin temperature, GSR, and SpO2 features over a 300-step temporal context.
+
+### Medium-Cycle Inference — 15 Minutes
+
+Every 15 minutes, the **SphereAI** subsystem on the RDK X5 aggregates audio, voice prosodics, and physiological signals to update:
+
+1. **Emotional State Classifier** — a weighted trimodal fusion of Language Agent, Voice Agent, and Biology Agent outputs, producing a categorical state label and confidence distribution.
+2. **Cortisol Estimator** — a Gradient Boosting regressor (200 trees) mapping GSR, HRV, and skin temperature to a blood cortisol proxy in ng/dL. This estimate acts as a continuous physiological ground truth for the emotional classifier.
+
+### Long-Cycle Inference — 24 Hours
+
+The daily inference loop runs over a **30-day rolling window** of accumulated biometric data. Three longitudinal models are updated:
+
+1. **Biological Age Clock** — an ensemble of Random Forest and XGBoost regressors that estimates your biological age in years, deviating from chronological age as a proxy for systemic health trajectory.
+2. **Cognitive Baseline Deviation Score** — CUSUM statistical drift detection applied to cognitive metrics (unique word ratio, semantic coherence, topic repetition) to flag statistically significant longitudinal decline.
+3. **Personalized Circadian Rhythm Model** — recalibrates your circadian phase estimate from 30 days of sleep-onset, wake-onset, cortisol-peak, and activity-trough data. Medication and care-schedule reminders are aligned to this model.
+
+---
+
+## Model Summary
+
+| Model | Architecture | Output | Update Cycle | Threshold |
+|---|---|---|---|---|
+| Anomaly Detector | Isolation Forest (100 trees) | Score 0–1 | 30 s | 0.7 soft / 0.9 emergency |
+| Pre-Seizure LSTM | 2×LSTM(64,32) + Dense | Prob 0–1 | 5 s (rolling window) | 0.85 |
+| Emotional Classifier | Weighted 3-stream fusion | State category | 15 m | Highest confidence |
+| Cortisol Estimator | Gradient Boost (200 trees) | ng/dL estimate | 15 m | — |
+| Biological Age Clock | Ensemble RF + XGBoost | Age in years | 24 h | Daily update |
+| Cognitive Tracker | Statistical drift (CUSUM) | Deviation score | 24 h | 2-sigma |
+
+---
+
+## Training Pipeline
+
+Every model follows the same offline-to-edge lifecycle:
+
+<Steps>
+  <Step title="Offline Training">
+    Models are trained in Python using scikit-learn, TensorFlow/Keras, or XGBoost on curated datasets or user-specific baseline data. Training outputs a serialized `.h5` (Keras) or `.pkl` (sklearn) artifact.
+  </Step>
+  <Step title="TFLite Conversion">
+    Keras models are converted to the TensorFlow Lite FlatBuffer format (`.tflite`) using `tf.lite.TFLiteConverter`. scikit-learn and XGBoost models are converted via the `sklearn2pmml` / `onnx` toolchain and wrapped in a TFLite-compatible inference shim.
+
+    ```python
+    import tensorflow as tf
+
+    converter = tf.lite.TFLiteConverter.from_saved_model('seizure_lstm_saved')
+    converter.optimizations = [tf.lite.Optimize.DEFAULT]
+    tflite_model = converter.convert()
+
+    with open('seizure_lstm.tflite', 'wb') as f:
+        f.write(tflite_model)
+    ```
+  </Step>
+  <Step title="Firmware Deployment">
+    `.tflite` binaries are flashed to the Vital32 ESP32 SPIFFS filesystem or deployed to the RDK X5 NPU runtime. The firmware scheduler invokes the appropriate TFLite Interpreter at each cycle boundary.
+  </Step>
+  <Step title="Baseline Lock and Live Activation">
+    Personalized models (Isolation Forest, Biological Age Clock) require a **30-day baseline collection period** before activation. During this period, raw data is collected but no alerts are raised. On day 31, the model is trained on local data and deployed live.
+  </Step>
+</Steps>
+
+---
+
+## Hardware Deployment Targets
+
+| Model Group | Target Hardware | Inference Runtime |
+|---|---|---|
+| Anomaly Detector, Seizure LSTM | Vital32 (ESP32-S3) | TensorFlow Lite Micro |
+| Emotional Classifier, Whisper STT, DistilBERT | RDK X5 NPU | TensorFlow Lite + ONNX Runtime |
+| Cortisol Estimator, Biological Age Clock, Cognitive Tracker | RDK X5 CPU | Scikit-learn / XGBoost native |
+
+<Warning>
+  The Vital32 ESP32-S3 has 512 KB SRAM and 8 MB PSRAM. TFLite Micro models deployed to it must have a total flatbuffer size under **1.2 MB** after quantization (INT8). The Seizure LSTM and Isolation Forest are both quantized at training time before deployment.
+</Warning>
+
+---
+
+## Explore Individual Models
+
+<CardGroup cols={2}>
+  <Card
+    title="Isolation Forest Anomaly Detection"
+    icon="shield-halved"
+    href="/ai/isolation-forest"
+  >
+    Deep dive into the real-time anomaly scorer running on Vital32: algorithm derivation, feature vector definition, threshold semantics, and training code.
+  </Card>
+  <Card
+    title="Pre-Seizure LSTM"
+    icon="brain"
+    href="/ai/seizure-lstm"
+  >
+    Architecture, training datasets (CHB-MIT, PhysioNet), temporal windowing strategy, and the binary cross-entropy loss formulation for seizure prediction.
+  </Card>
+  <Card
+    title="Emotional State Classifier"
+    icon="face-smile"
+    href="/ai/emotional-classifier"
+  >
+    The trimodal Language–Voice–Biology fusion architecture, MetaClassifier dynamic weighting, and longitudinal cognitive baseline modeling.
+  </Card>
+  <Card
+    title="Model Performance & Benchmarks"
+    icon="chart-line"
+    href="/ai/model-performance"
+  >
+    Full performance table, training data sources, threshold rationale, and hardware deployment targets for every model in the pipeline.
+  </Card>
+</CardGroup>

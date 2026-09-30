@@ -1,0 +1,276 @@
+---
+title: 'HollowRover Navigation: SLAM, UWB, and Floor Detection'
+sidebarTitle: 'Navigation'
+description: 'ROS2 package architecture, SLAM Toolbox lifelong mapping, 3-anchor UWB trilateration, barometric floor detection, and BLE RSSI fallback for HollowRover.'
+---
+
+
+<Info>
+  HollowRover's navigation stack is built on ROS2 Humble with Nav2 and SLAM Toolbox. Familiarity with ROS2 concepts — nodes, topics, transforms, and the `tf2` tree — is assumed throughout this page.
+</Info>
+
+HollowRover's navigation system solves a problem that most indoor robots sidestep: **reliable, sub-room-level localization in a multi-floor environment without external infrastructure dependencies at runtime**. The three-tier stack — UWB trilateration → barometric floor detection → BLE RSSI fallback — ensures the rover can always locate itself and its care recipient, degrading gracefully through each tier rather than failing hard.
+
+---
+
+## ROS2 Workspace Structure
+
+The full HollowRover software stack lives in a single ROS2 workspace. Each package has a tightly scoped responsibility; inter-package communication happens exclusively over typed ROS2 topics and action servers.
+
+```
+hollowrover_ws/
+├── src/
+│   ├── hollowrover_bringup/        ← Launch files for full system startup
+│   │     launch/
+│   │       hollowrover.launch.py   ← Master launch: all nodes + Nav2 + SLAM
+│   │       nav_only.launch.py      ← Navigation stack without arm / dispenser
+│   │
+│   ├── hollowrover_description/    ← URDF robot model
+│   │     urdf/
+│   │       hollowrover.urdf.xacro  ← Full robot URDF with tf frames
+│   │       arm.urdf.xacro          ← 6-DOF arm macro
+│   │
+│   ├── hollowrover_navigation/     ← Nav2 configuration
+│   │     config/
+│   │       nav2_params.yaml        ← Controller, planner, costmap params
+│   │       slam_toolbox_params.yaml
+│   │
+│   ├── hollowrover_protocols/      ← Biomarker-triggered action nodes
+│   │     hollowrover_protocols/
+│   │       fall_response.py        ← Fall detection → dispatch + alert
+│   │       medication_delivery.py  ← Scheduled and manual dispensing
+│   │       seizure_cushion.py      ← Pre-seizure intercept maneuver
+│   │       cortisol_deescalate.py  ← Stress-spike approach + audio
+│   │       security_barrier.py     ← Unregistered face → arm block
+│   │
+│   ├── hollowrover_hardware/       ← ESP32 serial bridge nodes (×2)
+│   │     hollowrover_hardware/
+│   │       drivetrain_serial_node.py
+│   │       manipulator_serial_node.py
+│   │
+│   ├── hollowrover_firebase/       ← Firebase state subscriber
+│   │     hollowrover_firebase/
+│   │       firebase_bridge.py      ← Listens to /lifesphere/... paths
+│   │
+│   └── hollowrover_arm/            ← 6-DOF arm control node
+│         hollowrover_arm/
+│           arm_controller.py       ← Joint trajectory → servo PWM
+│           poses.py                ← Named pose library (stow, barrier, reach)
+```
+
+<Note>
+  `hollowrover_protocols/` nodes are **action clients**, not services. They issue Nav2 `NavigateToPose` action goals and await feedback, allowing the protocol to respond to preemption (e.g., user moves mid-delivery) without blocking the system.
+</Note>
+
+---
+
+## SLAM: Lifelong Mapping with SLAM Toolbox
+
+HollowRover uses **SLAM Toolbox** in `lifelong` mode rather than the simpler `mapping` or `localization` modes. Lifelong mode maintains a persistent serialized map on disk and continues to refine it across power cycles — critical in a caregiving deployment where the environment changes over time (furniture moves, new obstacles appear).
+
+### Key Nav2 Parameters
+
+```yaml
+# hollowrover_navigation/config/nav2_params.yaml (excerpt)
+
+controller_server:
+  ros__parameters:
+    controller_frequency: 20.0          # Hz — 50 ms control loop
+    FollowPath:
+      plugin: "nav2_regulated_pure_pursuit_controller::RegulatedPurePursuitController"
+      desired_linear_vel: 0.3           # m/s — conservative for care environment
+      max_angular_vel: 1.0              # rad/s
+      transform_tolerance: 0.1
+
+local_costmap:
+  ros__parameters:
+    inflation_layer:
+      inflation_radius: 0.35            # metres — 35 cm safety bubble
+
+global_costmap:
+  ros__parameters:
+    inflation_layer:
+      inflation_radius: 0.35
+
+slam_toolbox:
+  ros__parameters:
+    mode: lifelong
+    map_file_name: /opt/hollowrover/maps/floor_$(env FLOOR_ID)
+    scan_topic: /scan
+    odom_topic: /odom
+    map_update_interval: 5.0            # seconds
+    resolution: 0.05                    # metres per cell (5 cm)
+    max_laser_range: 12.0               # STL-19P maximum usable range
+```
+
+The **0.35 m inflation radius** is deliberately conservative. Residential spaces require the rover to navigate near seated users, low furniture, and medical equipment. A tighter radius risks contact; the 35 cm bubble ensures a minimum 15 cm clearance on each side of the 20 cm rover body.
+
+---
+
+## UWB 3-Anchor Trilateration
+
+### Why Three Anchors
+
+Two-anchor UWB localization produces a **circular intersection ambiguity**: a tag equidistant to both anchors lies somewhere on a line perpendicular to the anchor axis, and ranging alone cannot resolve which side. In a caregiving scenario where the rover might need to distinguish between the user at a desk versus the user in a nearby bed, this ambiguity is clinically unacceptable.
+
+Three non-collinear anchors produce **exactly one intersection point** (in the absence of noise), eliminating the ambiguity entirely. The non-collinear constraint is enforced at commissioning time — the setup tool rejects anchor configurations where the triangle area falls below a minimum threshold.
+
+### Anchor Commissioning
+
+<Steps>
+  <Step title="Survey anchor positions">
+    Measure each anchor's $(x, y)$ position in the floor's local coordinate frame (origin at the SLAM map origin). Record positions to the nearest centimetre. Enter values into the floor's Firebase document at `/lifesphere/floors/{floorId}/uwb_anchors`.
+  </Step>
+  <Step title="Record barometric baseline">
+    With the rover stationary on the target floor, record the BME688 pressure reading averaged over 60 seconds. Store as `pressure_baseline_hPa` in the same Firebase document.
+  </Step>
+  <Step title="Build SLAM map">
+    Run the rover in manual teleoperation mode for a full traversal of the floor. SLAM Toolbox builds and serializes the map to `/opt/hollowrover/maps/floor_{floorId}`.
+  </Step>
+  <Step title="Validate trilateration">
+    Run the `uwb_validation` tool from `hollowrover_navigation`. It drives the rover to three known ground-truth positions and reports mean position error. Target: **≤ 10 cm RMS**.
+  </Step>
+</Steps>
+
+### Trilateration Algorithm
+
+The solver runs inside `hollowrover_navigation/uwb_localizer.py` at 10 Hz, feeding position estimates into a ROS2 `PoseWithCovarianceStamped` message published to `/uwb_pose`. The AMCL layer fuses this with odometry for the final localization estimate.
+
+```python
+
+def trilaterate_3anchor(a, b, c, rA, rB, rC):
+    """
+    Compute 2D position from three anchor ranges.
+
+    Parameters
+    ----------
+    a, b, c : tuple[float, float]
+        (x, y) positions of anchors A, B, and C in the floor coordinate frame.
+    rA, rB, rC : float
+        Measured TWR (two-way ranging) distances to anchors A, B, and C in metres.
+
+    Returns
+    -------
+    tuple[float, float]
+        Estimated (x, y) tag position in the floor coordinate frame.
+
+    Notes
+    -----
+    Derived from the standard linear least-squares reduction of the
+    circle-intersection system. With exactly three anchors the system
+    is exactly determined; np.linalg.solve produces an exact solution
+    rather than a least-squares approximation.
+    """
+    A = 2.0 * np.array([
+        [b[0] - a[0], b[1] - a[1]],
+        [c[0] - a[0], c[1] - a[1]]
+    ])
+
+    b_vec = np.array([
+        rA**2 - rB**2 + b[0]**2 - a[0]**2 + b[1]**2 - a[1]**2,
+        rA**2 - rC**2 + c[0]**2 - a[0]**2 + c[1]**2 - a[1]**2
+    ])
+
+    pos = np.linalg.solve(A, b_vec)
+    return float(pos[0]), float(pos[1])
+```
+
+**Numerical conditioning:** The matrix $A$ becomes ill-conditioned as the three anchors approach collinearity — the determinant of $A$ approaches zero and small ranging errors produce large position errors. Monitor `np.linalg.cond(A)` at startup; if the condition number exceeds 50, the anchor layout should be revised.
+
+---
+
+## Barometric Floor Detection
+
+Each registered floor stores a **pressure baseline** $P_0$ (in hPa) recorded at commissioning. The BME688 onboard the rover samples at 1 Hz and maintains a 10-sample rolling average $P_\text{measured}$. Floor index is estimated by:
+
+$$
+z_\text{floor} = \frac{P_0 - P_\text{measured}}{\Delta P_\text{floor}}
+$$
+
+Where $\Delta P_\text{floor}$ is the empirically measured pressure drop per floor in the specific building (typically 0.12 hPa/m, equivalent to ~1 hPa per standard floor height of ~3 m). The rover selects the registered floor whose stored baseline minimizes $|P_0 - P_\text{measured}|$, then loads:
+
+1. The corresponding SLAM Toolbox map file
+2. The floor's UWB anchor geometry
+3. The floor's Nav2 costmap (in case of floor-specific obstacles)
+
+<Note>
+  Barometric sensing is susceptible to HVAC pressure changes, door-opening transients, and weather fronts. The floor selection algorithm applies a **5-second debounce**: a new floor index must persist for at least 5 seconds before the map switch is committed. This prevents spurious map reloads during pressure transients.
+</Note>
+
+---
+
+## BLE RSSI Fallback
+
+When the UWB quality monitor in `uwb_localizer.py` detects that fewer than three anchors are responding above the minimum SNR threshold, the node publishes a `LocalizationMode` message switching the system to BLE RSSI mode.
+
+### RSSI Scanning Protocol
+
+The rover executes a **rotational RSSI scan** in place:
+
+<Steps>
+  <Step title="Halt navigation">
+    Cancel the current Nav2 goal. The rover stops in place. Navigation is suspended for the duration of the scan.
+  </Step>
+  <Step title="Sample RSSI at N headings">
+    Rotate in 45° increments (8 headings total). At each heading, command the HC-05 into inquiry mode and average the RSSI over 500 ms. Record `(heading_rad, rssi_dBm)` pairs.
+  </Step>
+  <Step title="Compute approach vector">
+    Fit a cosine model to the RSSI-vs-heading profile. The peak heading is the estimated direction of the wearable transmitter. Compute a waypoint 1.5 m in that direction.
+  </Step>
+  <Step title="Navigate toward peak RSSI">
+    Issue a Nav2 `NavigateToPose` goal to the computed waypoint. On arrival, repeat the scan. Continue until UWB quality is restored or the rover arrives within 1 m of the estimated position.
+  </Step>
+  <Step title="Transition back to UWB">
+    When the quality monitor confirms three anchors above SNR threshold for 3 consecutive seconds, the system reverts to UWB trilateration. No manual intervention is required.
+  </Step>
+</Steps>
+
+<Note>
+  BLE RSSI localization is **directional, not metric** — it cannot produce a precise coordinate, only a bearing. Its purpose is to maintain approximate person-proximity during UWB outages, not to substitute for trilateration accuracy. Position covariance in the fused pose estimate is inflated accordingly during RSSI mode.
+</Note>
+
+---
+
+## Multi-Floor Deployment
+
+### EntryGuard Integration
+
+**EntryGuard** nodes — deployed at doorways and floor transition points — publish `ZoneAlert` messages that include:
+
+- The originating `floor_id` and `zone_id`
+- The UWB anchor set for that floor
+- The barometric baseline for that floor
+- The nature of the triggering event (motion, biometric, presence)
+
+When a `ZoneAlert` arrives on the `hollowrover_protocols/` action server, the rover:
+
+1. Reads the `floor_id` from the alert payload
+2. Compares it to the current floor context
+3. If different, pauses autonomy and emits a `FloorTransitionRequired` notification to the guardian — the rover cannot self-relocate between floors
+
+After manual relocation, the rover re-identifies its floor via barometric sensing, reloads the appropriate SLAM map and UWB anchor geometry, performs a brief rotational scan to re-localize within the SLAM map, and resumes the pending protocol.
+
+<Note>
+  HollowRover does **not** physically climb stairs. Floor transitions require a lift, ramp, or manual relocation by a caregiver or guardian. After relocation, the rover autonomously re-establishes its floor context — no software intervention is needed. Design building deployments with ramp access or lift availability in mind when multi-floor autonomous coverage is required.
+</Note>
+
+### Floor Registry Schema (Firebase)
+
+```json
+// /lifesphere/floors/{floorId}
+{
+  "floor_id": "floor_2",
+  "label": "Second Floor — East Wing",
+  "pressure_baseline_hPa": 1011.4,
+  "delta_P_per_floor_hPa": 1.02,
+  "slam_map_path": "/opt/hollowrover/maps/floor_2",
+  "uwb_anchors": {
+    "A": { "x": 0.0,  "y": 0.0  },
+    "B": { "x": 4.2,  "y": 0.0  },
+    "C": { "x": 2.1,  "y": 3.8  }
+  },
+  "zones": {
+    "bedroom": { "x_min": 1.0, "x_max": 3.5, "y_min": 2.0, "y_max": 4.5 }
+  }
+}
+```

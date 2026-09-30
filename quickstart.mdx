@@ -1,47 +1,311 @@
 ---
-title: "Quickstart"
-description: "Begin with a guide on the fastest path to a successful outcome"
+title: 'Get Started with LifeSphere: From Hardware to Live Data'
+sidebarTitle: 'Quickstart'
+description: 'Provision your Firebase project, flash and verify Vital32, deploy HollowRover with SLAM, and validate all five LifeSphere subsystems end-to-end.'
 ---
 
-Describe how someone begins using your product. What is the first thing they need to do? Are there any prerequisites?
 
-A quickstart should take someone from zero to using your product. They'll get a quick win and a sense of what they can accomplish.
+This guide takes you from a fresh Firebase project to a fully operational LifeSphere ecosystem with all five subsystems writing and reading live biometric state. Follow the steps in order — each step's output is a prerequisite for the next.
 
-## Prerequisites
-
-Before you begin, you must have:
-
-- Requirement one (for example, Node.js 18+, a free account, an API key)
-- Requirement two (for example, a compatible device, a compatible browser, a compatible operating system)
-
-## Get started
+<Note>
+  Each subsystem has its own detailed build guide linked in the sidebar. This quickstart validates the integration path end-to-end; subsystem-specific guides cover hardware assembly tolerances, firmware configuration parameters, and calibration procedures in full.
+</Note>
 
 <Steps>
-  <Step title="Install">
-    Describe how to install your product or sign up.
+  <Step title="Firebase Project Setup">
+    LifeSphere's shared biological state backbone runs on Firebase Realtime Database. You will create and configure the project before flashing any hardware.
 
-    ```bash
-    npm install your-package
+    **1. Create the Firebase project**
+
+    Navigate to [console.firebase.google.com](https://console.firebase.google.com) and create a new project. Name it exactly `LifeSphere` — the name is referenced in several firmware configuration strings and inconsistencies will cause authentication failures.
+
+    Disable Google Analytics when prompted; it is not used by any LifeSphere component.
+
+    **2. Enable Realtime Database**
+
+    In the Firebase console, go to **Build → Realtime Database → Create Database**. Select the region `asia-southeast1` (Singapore). When asked for the initial security rules, choose **Start in locked mode** — you will replace the rules in the next step.
+
+    **3. Apply authenticated-only security rules**
+
+    Open the **Rules** tab in the Realtime Database console and replace the default rules with the following:
+
+    ```json
+    {
+      "rules": {
+        "lifesphere": {
+          ".read": "auth != null",
+          ".write": "auth != null"
+        }
+      }
+    }
     ```
+
+    For production deployments, replace the write rule with the per-subsystem namespace-scoped rules documented in the [Architecture guide](/system-architecture#security-and-data-integrity).
+
+    **4. Download the service account key**
+
+    Go to **Project Settings → Service Accounts → Generate new private key**. Download the JSON file and save it as `serviceAccountKey.json` in the root of your LifeSphere backend directory. This file grants full administrative access to your database — do not commit it to version control.
+
+    **5. Retrieve your Web API key**
+
+    Go to **Project Settings → General**. Copy the **Web API key** — you will need it in the next step when configuring the ESP32 firmware.
+
+    <Warning>
+      The `serviceAccountKey.json` file contains credentials that bypass all Firebase security rules. Store it in a secrets manager or environment variable in any deployment beyond a development workbench.
+    </Warning>
   </Step>
-  <Step title="Configure">
-    Describe any setup or configuration needed before first use.
 
-    ```bash
-    your-cli init
+  <Step title="Build and Flash Vital32">
+    Vital32 is the biosensing wearable at the center of the ecosystem. It is built on an ESP32 development board with five sensor ICs communicating over I²C.
+
+    **Hardware assembly**
+
+    Connect all five sensors to the ESP32's I²C bus (GPIO 21 = SDA, GPIO 22 = SCL). Verify you can detect each sensor at its expected I²C address before flashing firmware:
+
+    | Sensor | Function | I²C Address |
+    |---|---|---|
+    | MAX30102 | Heart rate and SpO₂ (PPG) | `0x57` |
+    | MPU6050 | Tri-axis accelerometer + gyroscope (fall detection) | `0x68` |
+    | MLX90614 | Non-contact infrared skin temperature | `0x5A` |
+    | BME688 | Barometric pressure + ambient temperature + humidity | `0x76` |
+    | SSD1306 | 128×64 OLED status display | `0x3C` |
+    | AD5933 | Bioimpedance spectroscopy (immune monitoring) | `0x0D` |
+
+    Run an I²C scanner sketch to confirm all six addresses respond before proceeding:
+
+    ```cpp
+    #include <Wire.h>
+
+    void setup() {
+      Wire.begin(21, 22);
+      Serial.begin(115200);
+      Serial.println("Scanning I2C bus...");
+      for (uint8_t addr = 1; addr < 127; addr++) {
+        Wire.beginTransmission(addr);
+        if (Wire.endTransmission() == 0) {
+          Serial.printf("Device found at 0x%02X\n", addr);
+        }
+      }
+    }
+
+    void loop() {}
     ```
+
+    All six addresses must appear in the scan output before you flash the main firmware.
+
+    **Configure and flash firmware**
+
+    Open `vital32/firmware/config.h` and set your credentials:
+
+    ```cpp
+    #define WIFI_SSID        "your-network-ssid"
+    #define WIFI_PASSWORD    "your-network-password"
+    #define FIREBASE_HOST    "your-project.firebaseio.com"
+    #define FIREBASE_AUTH    "your-database-secret"
+    ```
+
+    Flash the firmware using the Arduino IDE or PlatformIO targeting the `esp32dev` board at 921600 baud. The main Firebase write loop is:
+
+    ```cpp
+    #include <FirebaseESP32.h>
+    #include <WiFi.h>
+
+    #define FIREBASE_HOST "your-project.firebaseio.com"
+    #define FIREBASE_AUTH "your-database-secret"
+
+    FirebaseData fbdo;
+
+    void writeToFirebase(SensorData data) {
+      Firebase.setFloat(fbdo, "/lifesphere/vital32/heart_rate", data.hr);
+      Firebase.setFloat(fbdo, "/lifesphere/vital32/spo2",       data.spo2);
+      Firebase.setBool(fbdo,  "/lifesphere/vital32/fall_detected", data.fall);
+    }
+    ```
+
+    After flashing, open the serial monitor at 115200 baud. You should see `WiFi connected`, followed by `Firebase connected`, followed by repeating sensor read lines within 10 seconds of boot.
+
+    <Tip>
+      If `Firebase connected` never appears but Wi-Fi connects successfully, the most common cause is an incorrect `FIREBASE_AUTH` value. Regenerate the database secret in **Project Settings → Service Accounts → Database secrets** and reflash.
+    </Tip>
   </Step>
-  <Step title="Run it">
-    Show the first thing a user does to see it working.
+
+  <Step title="Verify Live Biometric Data in Firebase">
+    Before bringing up any other subsystem, confirm that Vital32 is writing valid data to Firebase and that your backend can subscribe to real-time updates.
+
+    **Inspect the Firebase console**
+
+    Open the Firebase Realtime Database console and navigate to `/lifesphere/vital32`. You should see all fields updating approximately every 30 seconds. Confirm that `heart_rate` is in a physiologically plausible range (50–120 bpm at rest), `spo2` is above 94%, and `timestamp` is advancing with each write.
+
+    **Run the Python listener**
+
+    Install the Firebase Admin SDK and run the following listener to verify your backend connection and test the three critical alert dispatch paths:
 
     ```bash
-    your-cli start
+    pip install firebase-admin
     ```
+
+    ```python
+    import firebase_admin
+    from firebase_admin import credentials, db
+
+    cred = credentials.Certificate('serviceAccountKey.json')
+    firebase_admin.initialize_app(cred, {
+        'databaseURL': 'https://your-project.firebaseio.com'
+    })
+
+    ref = db.reference('/lifesphere/vital32')
+
+    def on_vital32_change(event):
+        data = event.data
+        if data.get('fall_detected'):
+            dispatch_fall_protocol()
+        if data.get('anomaly_score', 0) > 0.9:
+            dispatch_emergency_protocol()
+        if data.get('seizure_prob', 0) > 0.85:
+            dispatch_seizure_protocol()
+
+    ref.listen(on_vital32_change)
+    ```
+
+    You should see the listener print incoming state updates in real time. To validate the alert dispatch logic without hardware, temporarily write a test value from the Firebase console:
+
+    ```json
+    { "fall_detected": true }
+    ```
+
+    Confirm that `dispatch_fall_protocol()` is called within 150 ms of the console write. Reset `fall_detected` to `false` before continuing.
+
+    <Note>
+      The `dispatch_fall_protocol`, `dispatch_emergency_protocol`, and `dispatch_seizure_protocol` functions are stubs in this snippet. In a complete deployment they initiate HollowRover dispatch, caregiver SMS via the GSM module, and SphereAI emotional context assessment in parallel. See the [Backend Communication Protocol](/backend/communication-protocol) guide for the full implementation.
+    </Note>
+  </Step>
+
+  <Step title="Deploy HollowRover and Register Floor Map">
+    HollowRover requires a valid SLAM-generated floor map and correctly placed UWB anchors before autonomous navigation can operate.
+
+    **ROS2 bringup**
+
+    HollowRover runs ROS2 Humble on a Raspberry Pi 4 co-located on the robot chassis. With the robot powered on and connected to the same local network, bring up the full navigation stack:
+
+    ```bash
+    # On the HollowRover Raspberry Pi
+    source /opt/ros/humble/setup.bash
+    source ~/hollowrover_ws/install/setup.bash
+
+    ros2 launch hollowrover_bringup hollowrover.launch.py
+    ```
+
+    Verify that the following nodes are active:
+
+    ```bash
+    ros2 node list
+    # Expected output includes:
+    # /hollowrover/base_controller
+    # /hollowrover/lidar_scan
+    # /hollowrover/navigation2
+    # /hollowrover/firebase_bridge
+    # /hollowrover/medication_dispenser
+    ```
+
+    **Generate the SLAM floor map**
+
+    Drive HollowRover through every room of the residence in teleoperation mode to build the occupancy grid:
+
+    ```bash
+    # Terminal 1 — start SLAM
+    ros2 launch hollowrover_nav slam_toolbox.launch.py
+
+    # Terminal 2 — teleoperation
+    ros2 run teleop_twist_keyboard teleop_twist_keyboard
+
+    # When complete, save the map
+    ros2 run nav2_map_server map_saver_cli -f ~/maps/residence_map
+    ```
+
+    Two files are generated: `residence_map.pgm` (occupancy grid image) and `residence_map.yaml` (resolution and origin metadata). Store both in `~/maps/` on the HollowRover Pi.
+
+    **Place UWB anchors**
+
+    Install three DWM1001 UWB anchor nodes at fixed, known positions in the residence — ideally at ceiling height in three non-collinear locations covering the full floor area. Record each anchor's `(x, y)` coordinates in meters relative to the SLAM map origin and enter them in `hollowrover_nav/config/uwb_anchors.yaml`:
+
+    ```yaml
+    anchors:
+      - id: 0
+        x: 0.0
+        y: 0.0
+      - id: 1
+        x: 4.2
+        y: 0.0
+      - id: 2
+        x: 2.1
+        y: 5.8
+    ```
+
+    Restart the navigation stack after updating the anchor configuration. Confirm that the robot's estimated position in RViz converges to within 0.3 m of its physical location before proceeding.
+
+    <Tip>
+      If the SLAM map has large unresolved regions (grey areas in the occupancy grid), the robot has not traversed those areas. Drive through all rooms, including closets and bathrooms, before saving the map. Unresolved areas will generate navigation failures when HollowRover is dispatched to those locations.
+    </Tip>
+  </Step>
+
+  <Step title="Validate Full Ecosystem Integration">
+    With all five subsystems powered on and connected, run the integration validation sequence to confirm end-to-end state propagation, watchdog health, and coordinated response behavior.
+
+    **Confirm all subsystems are writing to Firebase**
+
+    Open the Firebase Realtime Database console and verify that all five namespaces are present and have recent timestamps:
+
+    ```
+    /lifesphere/vital32/timestamp      → within last 35 seconds
+    /lifesphere/sphereai/emotional_state → present
+    /lifesphere/hollowrover/status     → "idle"
+    /lifesphere/hollowcore/ac_temp     → present
+    /lifesphere/entryguard/mode        → "passive"
+    ```
+
+    **Verify watchdog activity**
+
+    Check that the ESP32 watchdog is being reset correctly (no unexpected reboots in the serial log) and that the HollowCore systemd services are running:
+
+    ```bash
+    # On HollowCore Raspberry Pi
+    systemctl status lifesphere-mqtt.service
+    systemctl status lifesphere-firebase-listener.service
+    systemctl status lifesphere-serial-bridge.service
+    ```
+
+    All three services should report `Active: active (running)`.
+
+    **Run the integration smoke test**
+
+    Execute the integration test script from your backend directory. It writes a controlled test event to Firebase and verifies that each downstream subsystem responds within the latency budget:
+
+    ```bash
+    python tools/integration_smoke_test.py \
+      --key serviceAccountKey.json \
+      --url https://your-project.firebaseio.com \
+      --test all
+    ```
+
+    Expected output on a passing system:
+
+    ```
+    [PASS] Vital32 → Firebase write latency:      23ms
+    [PASS] Firebase → SphereAI listener latency:  87ms
+    [PASS] Firebase → HollowRover bridge latency: 112ms
+    [PASS] Firebase → HollowCore relay latency:   44ms
+    [PASS] Firebase → EntryGuard listener latency: 91ms
+    [PASS] End-to-end (worst path):               112ms  (target: <150ms)
+    [PASS] Watchdog: all subsystems healthy
+    [PASS] GSM fallback: SIM module responsive
+    [PASS] SD card buffer: write/read verified
+    LifeSphere integration validation: ALL TESTS PASSED
+    ```
+
+    If any subsystem exceeds the 150 ms latency budget, check local network congestion and verify that the Firebase project region is set to `asia-southeast1`. Deploying the Firebase project in a region geographically distant from the hardware installation adds fixed round-trip time that cannot be recovered elsewhere in the stack.
+
+    <Info>
+      LifeSphere is now fully operational. Vital32 is sampling and writing biometric state. HollowRover is navigating autonomously. SphereAI is assessing emotional state. HollowCore is adjusting the environment. EntryGuard is monitoring the entry points. The shared biological state object is the living record of the resident — every subsystem is reading from it, every alert is grounded in it, and every response is traceable back through it.
+    </Info>
   </Step>
 </Steps>
-
-<Tip>
-  Give people a way to get help. This could be a link to a support page, a chat with a customer support agent, or a forum for your product.
-
-  Example: Need help? Reach out to us at [support@yourcompany.com](mailto:support@yourcompany.com).
-</Tip>

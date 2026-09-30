@@ -1,0 +1,294 @@
+---
+title: 'SphereAI TriAgent Fusion Logic and Meta-Classifier'
+sidebarTitle: 'TriAgent Fusion'
+description: "Technical reference for SphereAI TriAgent architecture: concurrent Language, Voice, and Biology agents fused by a prior-state-conditioned MetaClassifier."
+---
+
+
+<Info>
+  Inference runs on a **15-minute medium cycle**. Acute threshold alerts (e.g. GSR spike above 20 µS with HRV collapse) are handled outside the fusion pipeline by direct Biology Agent rules to minimize latency.
+</Info>
+
+## Architecture Overview
+
+SphereAI's TriAgent architecture decomposes affective state inference into three independent analytical pipelines that execute **concurrently** on the RDK X5. Each agent produces a probability distribution over the set of recognized emotional states. The MetaClassifier then fuses those distributions using weights dynamically selected by the prior emotional state.
+
+```
+                     ┌──────────────────────────────────────────────────┐
+                     │              TriAgent Parallel Execution          │
+                     │                                                  │
+  Audio waveform ───►│  Language Agent     Voice Agent                 │
+  (post wake-word)   │  ┌────────────┐    ┌────────────┐               │
+                     │  │ Whisper STT│    │   Librosa  │               │
+                     │  │ DistilBERT │    │ MFCC/Pitch │               │
+                     │  │ Coherence  │    │ Energy/ZCR │               │
+                     │  └─────┬──────┘    └──────┬─────┘               │
+                     │        │                  │                      │
+  Firebase ─────────►│        │    Biology Agent │                      │
+  /vital32           │        │   ┌────────────┐ │                      │
+                     │        │   │GSR HRV     │ │                      │
+                     │        │   │cortisol_est│ │                      │
+                     │        │   │heart_rate  │ │                      │
+                     │        │   └─────┬──────┘ │                      │
+                     │        │         │        │                      │
+                     └────────┼─────────┼────────┼──────────────────────┘
+                              │         │        │
+                              ▼         ▼        ▼
+                         ┌────────────────────────────┐
+                         │       MetaClassifier        │
+                         │   prior_state → weights     │
+                         │   weighted fusion → argmax  │
+                         └───────────┬─────────────────┘
+                                     │
+                                     ▼
+                         Firebase /lifesphere/sphereai
+                         {emotional_state, stress_level,
+                          loneliness_index, cognitive_score}
+```
+
+---
+
+## Software Dependencies
+
+Install all SphereAI Python dependencies on the RDK X5 before deployment:
+
+```bash
+pip install openai-whisper  # Speech-to-text (Language Agent)
+pip install librosa          # Audio feature extraction (Voice Agent)
+pip install transformers torch # NLP sentiment + coherence
+pip install scikit-learn     # Meta-classifier
+pip install firebase-admin   # Firebase SDK
+pip install numpy scipy      # Signal processing
+pip install sounddevice      # Microphone capture
+pip install pyttsx3          # Text-to-speech output
+pip install luma.oled        # SSD1306 OLED display
+```
+
+<Note>
+  The RDK X5 targets PyTorch for ARM. Confirm your board's compatible wheel index before installing `torch` — the upstream PyPI wheel may not include NEON optimizations. Use the Horizon Robotics provided package mirror when available.
+</Note>
+
+---
+
+## Language Agent
+
+The Language Agent is responsible for both **affective sentiment** and **cognitive health markers**. It operates on the transcript produced by Whisper STT.
+
+### Sentiment Analysis
+
+DistilBERT, fine-tuned on affective corpora, maps the transcript to a probability distribution over emotional states. DistilBERT was selected over full BERT for deployment on the RDK X5: it retains 97% of BERT's performance on sentiment benchmarks at 40% of the inference cost.
+
+### Cognitive Markers
+
+Three additional features are extracted from the transcript and contribute to the `cognitive_score` written to Firebase:
+
+| Feature | Computation | Decline Signal |
+|---|---|---|
+| **Unique word ratio** | `len(set(tokens)) / len(tokens)` | Ratio declining over weeks → reduced lexical diversity |
+| **Topic repetition** | Cosine similarity between consecutive turn embeddings | Rising similarity → short-term memory loss indicator |
+| **Semantic coherence** | Mean sentence-to-sentence embedding cosine similarity | Falling coherence → disorganized thought |
+
+These are longitudinal signals. A single conversation's values are noisy; SphereAI tracks their **7-day and 30-day rolling means** and flags statistically significant downward trends for caregiver review.
+
+---
+
+## Voice Agent
+
+The Voice Agent analyzes the acoustic waveform independently of linguistic content, using Librosa's signal processing toolkit. This decoupling is deliberate — a resident may speak calmly about distressing topics, but their vocal acoustics will reflect the underlying affective load.
+
+### Extracted Features
+
+```python
+
+def extract_voice_features(audio_path: str, sr: int = 16000) -> dict:
+    y, sr = librosa.load(audio_path, sr=sr)
+
+    # MFCC — 13 coefficients capturing spectral envelope
+    mfcc = librosa.feature.mfcc(y=y, sr=sr, n_mfcc=13)
+    mfcc_mean = np.mean(mfcc, axis=1)
+
+    # Fundamental pitch (f0) via YIN algorithm
+    f0, voiced_flag, _ = librosa.pyin(y, fmin=80, fmax=400)
+    f0_mean = np.nanmean(f0)
+
+    # Short-time energy (RMS)
+    energy = librosa.feature.rms(y=y)
+    energy_mean = float(np.mean(energy))
+
+    # Tempo (speech rate proxy)
+    tempo, _ = librosa.beat.beat_track(y=y, sr=sr)
+
+    # Zero-crossing rate
+    zcr = librosa.feature.zero_crossing_rate(y)
+    zcr_mean = float(np.mean(zcr))
+
+    return {
+        'mfcc': mfcc_mean.tolist(),
+        'f0_mean': f0_mean,
+        'energy_mean': energy_mean,
+        'tempo': float(tempo),
+        'zcr_mean': zcr_mean,
+    }
+```
+
+| Feature | Emotional Mapping |
+|---|---|
+| MFCC deviation from baseline | General affective departure from neutral state |
+| f0 elevated (>15% above baseline) | Anxiety, acute stress |
+| f0 suppressed (&lt;15% below baseline) | Depressive affect, dissociation |
+| Energy suppressed | Fatigue, grief, withdrawal |
+| Tempo elevated | Agitation, anxiety |
+| ZCR elevated | Breathy speech pattern, distress |
+
+---
+
+## Biology Agent
+
+The Biology Agent reads four biomarker streams from the Vital32 wearable via Firebase Realtime Database. It requires no local computation beyond normalization — the Vital32 firmware handles signal processing and uploads at 1 Hz.
+
+### Firebase Read Path
+
+```python
+from firebase_admin import db
+
+def read_vital32_snapshot() -> dict:
+    ref = db.reference('/lifesphere/vital32')
+    data = ref.get()
+    return {
+        'gsr':          data.get('gsr', 0.0),          # µS
+        'hrv_rmssd':    data.get('hrv_rmssd', 0.0),    # ms
+        'cortisol_est': data.get('cortisol_est', 0.0), # normalized proxy
+        'heart_rate':   data.get('heart_rate', 0.0),   # BPM
+    }
+```
+
+### Biomarker Interpretation
+
+| Key | Signal | Elevated Indicates | Suppressed Indicates |
+|---|---|---|---|
+| `gsr` | Galvanic skin response | Sympathetic arousal, acute stress | Calm, sleep |
+| `hrv_rmssd` | Heart rate variability | Parasympathetic dominance, resilience | Stress, fatigue, poor recovery |
+| `cortisol_est` | Estimated cortisol proxy | Chronic HPA-axis activation | Healthy or adrenal fatigue |
+| `heart_rate` | Heart rate (BPM) | Exertion, anxiety, fever | Rest, bradycardia |
+
+<Note>
+  `cortisol_est` is a model-derived proxy computed from GSR trend, HRV suppression duration, and time-of-day circadian priors — it is not a direct biochemical measurement. It should be treated as a corroborating signal, not a clinical assay.
+</Note>
+
+---
+
+## MetaClassifier: Dynamic Weight Fusion
+
+The MetaClassifier is the architectural centrepiece of SphereAI. It receives the probability distributions from all three agents and fuses them using a weight vector conditioned on the prior emotional state. This context-sensitivity is what distinguishes SphereAI from naive ensemble averaging.
+
+### Weight Table
+
+| Prior State | Language | Voice | Biology | Design Rationale |
+|---|---|---|---|---|
+| `calm` | 0.4 | 0.3 | 0.3 | Baseline — all modalities reliable; language slightly preferred for precision |
+| `stressed` | 0.2 | 0.3 | 0.5 | Physiological load is the most diagnostic channel under stress |
+| `grief` | 0.3 | 0.4 | 0.3 | Vocal prosody (suppressed energy, flat pitch) is the primary grief signal |
+| `isolated` | 0.2 | 0.2 | 0.6 | Verbal and vocal withdrawal are symptoms of isolation, not its absence; biology persists |
+| `cognitive` | 0.5 | 0.3 | 0.2 | Linguistic features (coherence, lexical diversity) carry the primary cognitive load signal |
+
+<Note>
+  The `isolated` state assigns biology a weight of **0.6** — the highest biology weight in the system. The rationale is non-trivial: social isolation typically presents as **verbal and vocal withdrawal**, meaning a resident experiencing isolation will speak less and exhibit flattened vocal affect. If the Language and Voice agents were weighted equally during isolation, their reduced signal quality would degrade overall classification. The physiological signature of isolation — elevated resting heart rate, GSR drift, HRV suppression over days — remains reliable precisely because it is involuntary. The system therefore increases reliance on the channel that cannot be suppressed by the symptom itself.
+</Note>
+
+### Implementation
+
+```python
+EMOTIONAL_STATES = [
+    'calm', 'stressed', 'grief', 'isolated', 'cognitive',
+    'anxious', 'fatigued', 'content'
+]
+
+class MetaClassifier:
+    WEIGHTS = {
+        'calm':      {'language': 0.4, 'voice': 0.3, 'biology': 0.3},
+        'stressed':  {'language': 0.2, 'voice': 0.3, 'biology': 0.5},
+        'grief':     {'language': 0.3, 'voice': 0.4, 'biology': 0.3},
+        'isolated':  {'language': 0.2, 'voice': 0.2, 'biology': 0.6},
+        'cognitive': {'language': 0.5, 'voice': 0.3, 'biology': 0.2},
+    }
+
+    def fuse(self, lang_out, voice_out, bio_out, prior_state):
+        w = self.WEIGHTS.get(prior_state, self.WEIGHTS['calm'])
+        scores = {}
+        for state in EMOTIONAL_STATES:
+            scores[state] = (
+                w['language'] * lang_out.get(state, 0) +
+                w['voice']    * voice_out.get(state, 0) +
+                w['biology']  * bio_out.get(state, 0)
+            )
+        return max(scores, key=scores.get), scores
+```
+
+The method returns a tuple: the winning state label and the full scores dictionary. The full scores dictionary is retained for logging and longitudinal trend analysis — downstream consumers should not discard it.
+
+### Fallback Behaviour
+
+When `prior_state` is not found in `WEIGHTS` (e.g. during first-run initialization before any state has been established), the classifier defaults to `calm` weights — a balanced, conservative prior that does not over-weight any single modality.
+
+---
+
+## Firebase Output Schema
+
+Fusion results are written to `/lifesphere/sphereai` after each inference cycle:
+
+```json
+{
+  "emotional_state": "stressed",
+  "stress_level": 0.74,
+  "loneliness_index": 0.31,
+  "cognitive_score": 0.88,
+  "scores_raw": {
+    "calm": 0.09,
+    "stressed": 0.74,
+    "grief": 0.03,
+    "isolated": 0.07,
+    "cognitive": 0.04,
+    "anxious": 0.02,
+    "fatigued": 0.01,
+    "content": 0.00
+  },
+  "prior_state": "calm",
+  "weights_applied": {
+    "language": 0.4,
+    "voice": 0.3,
+    "biology": 0.3
+  },
+  "timestamp": 1718200800
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `emotional_state` | string | Winning classification from MetaClassifier argmax |
+| `stress_level` | float [0,1] | Biology Agent stress composite score |
+| `loneliness_index` | float [0,1] | Derived from isolation score + interaction frequency |
+| `cognitive_score` | float [0,1] | Language Agent cognitive health composite (higher = healthier) |
+| `scores_raw` | object | Full probability distribution across all states |
+| `prior_state` | string | State used to select fusion weights this cycle |
+| `weights_applied` | object | Weight vector that was applied — retained for auditability |
+| `timestamp` | int | Unix epoch of inference run |
+
+---
+
+## Inference Cycle Timing
+
+```
+T+0:00  Wake-word detected → UART trigger to RDK X5
+T+0:01  Audio buffer captured (10s window)
+T+0:03  Whisper STT transcription complete
+T+0:05  DistilBERT sentiment + cognitive features extracted
+T+0:05  Librosa feature extraction complete (parallel)
+T+0:05  Firebase Vital32 snapshot read (parallel)
+T+0:06  MetaClassifier fusion run
+T+0:06  Results written to Firebase /lifesphere/sphereai
+T+15:00 Next scheduled medium-cycle inference run
+```
+
+<Warning>
+  The 15-minute medium cycle is the **scheduled inference interval** for longitudinal state modeling. It does not govern acute alert latency. Direct Biology Agent threshold rules (e.g. GSR > 20 µS sustained for 30 seconds with HRV_RMSSD below 20 ms) fire independently of the fusion cycle and can trigger immediate caregiver notification.
+</Warning>

@@ -1,0 +1,277 @@
+---
+title: 'SphereAI Voice Hardware: Microphone, Amplifier, Wake-Word'
+sidebarTitle: 'Voice Hardware'
+description: 'Complete voice I/O chain for SphereAI: INMP441 I2S microphone, MAX98357A Class D amplifier, ESP32-S3 wake-word engine, and UART handoff to RDK X5.'
+---
+
+
+## Voice I/O Architecture
+
+SphereAI's voice hardware is a fully digital signal chain. No analog audio crosses the system boundary — audio is captured, processed, and reproduced entirely in the digital domain from microphone diaphragm to speaker cone. This design decision was made for three reasons: immunity to board-level electromagnetic interference, elimination of analog-to-digital conversion as a noise source, and direct pipeline compatibility with Whisper STT's 16 kHz PCM input format.
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                     Voice I/O Signal Chain                      │
+│                                                                 │
+│  ┌──────────────┐   I2S    ┌──────────────────────────────┐    │
+│  │   INMP441    │──────────►                              │    │
+│  │  I2S Mic     │  BCLK    │         ESP32-S3             │    │
+│  │  24-bit      │  WS      │                              │    │
+│  │  up to 48kHz │  DOUT    │  ESP-SR Wake-Word Model      │    │
+│  └──────────────┘          │  (always-on, low power)      │    │
+│                            │                              │    │
+│  ┌──────────────┐   I2S    │                              │    │
+│  │  MAX98357A   │◄─────────│                              │    │
+│  │  Class D Amp │  BCLK    │                              │    │
+│  │  3W / 4Ω     │  WS      └──────────┬───────────────────┘    │
+│  │  Speaker     │  DIN                │                        │
+│  └──────────────┘                     │ UART 115200 baud       │
+│                                       │ (wake-word event)      │
+│                                       ▼                        │
+│                              ┌──────────────────┐              │
+│                              │     RDK X5        │              │
+│                              │                  │              │
+│                              │  Whisper STT     │              │
+│                              │  TriAgent Fusion │              │
+│                              │  pyttsx3 TTS     │              │
+│                              └──────────────────┘              │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+---
+
+## INMP441 I2S Digital Microphone
+
+The INMP441 is a MEMS microphone with an integrated sigma-delta ADC that outputs **24-bit PCM audio over I2S** at sample rates up to 48 kHz. SphereAI operates it at 16 kHz to match Whisper STT's native input format and reduce the data throughput on the I2S bus.
+
+### Electrical Interface
+
+| INMP441 Pin | ESP32-S3 Pin | Signal |
+|---|---|---|
+| SCK | GPIO 14 | BCLK — serial bit clock |
+| WS | GPIO 15 | Word select (left/right channel) |
+| SD | GPIO 13 | DOUT — serial data output |
+| VDD | 3.3V | Power supply |
+| GND | GND | Ground |
+| L/R | GND | Channel select → left channel output |
+
+### Why I2S Over Analog Electret
+
+The conventional alternative — an electret condenser microphone feeding an analog amplifier and ADC — introduces several failure modes that I2S eliminates:
+
+<AccordionGroup>
+  <Accordion title="Quantization Noise Floor">
+    A discrete ADC introduces quantization noise proportional to its bit depth. The INMP441's integrated sigma-delta ADC achieves a signal-to-noise ratio of **61 dB(A)** with effective quantization noise well below the spectral content of human speech. An equivalent discrete analog chain on a PCB with motor drivers, switching regulators, and servo PWM lines would struggle to achieve 50 dB(A) SNR at the ADC input.
+  </Accordion>
+  <Accordion title="Clock Jitter Immunity">
+    Analog audio is continuous — any jitter in the ADC sampling clock translates directly to phase noise in the digitized signal. I2S uses a synchronous clocked interface: the BCLK line from the ESP32-S3 governs both the microphone's output timing and the subsequent data latching. Jitter is bounded by the ESP32-S3's clock generator, not by the length or quality of the analog trace.
+  </Accordion>
+  <Accordion title="Direct Digital Pipeline to Whisper STT">
+    Whisper STT expects a PCM waveform as input. With an I2S microphone, the audio travels from the microphone's internal ADC through a digital serial bus to the ESP32-S3's I2S peripheral, across UART (or DMA buffer) to the RDK X5, and into Whisper — entirely in the digital domain. There is no analog-to-digital conversion stage introduced by the host platform. The signal the model processes is the signal the microphone digitized, without intermediate re-quantization.
+  </Accordion>
+</AccordionGroup>
+
+<Tip>
+  Position the INMP441 as far as physically possible from the HollowRover's servo motors — ideally at the top of the rover chassis or on a purpose-built boom above the motor bay. Servo motors generate broadband mechanical vibration in the 50–300 Hz range that directly overlaps the fundamental frequency range of human speech (85–255 Hz). Vibration coupling through the PCB substrate into the MEMS diaphragm manifests as low-frequency noise that Whisper STT will attempt to transcribe. A 5 cm separation with a foam isolation mount reduces this coupling by 15–20 dB in practice.
+</Tip>
+
+---
+
+## MAX98357A I2S Class D Amplifier
+
+The MAX98357A is a filterless Class D audio amplifier with an I2S digital input, delivering **3W into a 4Ω speaker** with up to 92.5% efficiency. Its filterless architecture eliminates the output LC filter required by conventional Class D designs, reducing BOM complexity and radiated emissions.
+
+### Electrical Interface
+
+| MAX98357A Pin | ESP32-S3 Pin | Signal |
+|---|---|---|
+| BCLK | GPIO 27 | I2S bit clock input |
+| LRC (WS) | GPIO 26 | Word select input |
+| DIN | GPIO 25 | I2S serial data input |
+| SD (Shutdown) | GPIO 21 | Active-high enable |
+| GAIN | — | Set via resistor (see below) |
+| VDD | 5V | Power supply |
+| GND | GND | Ground |
+
+### Gain Configuration
+
+The MAX98357A output gain is set by a resistor between the GAIN pin and either VDD or GND:
+
+| GAIN Pin State | Output Gain |
+|---|---|
+| Floating | +9 dB (default) |
+| 100 kΩ to GND | +12 dB |
+| 100 kΩ to VDD | +15 dB |
+| Direct to GND | Shutdown |
+
+For indoor voice applications on the HollowRover, +9 dB (floating GAIN) produces adequate SPL at conversational distances of 1–3 metres from the resident.
+
+### Audio Output Use Cases
+
+The MAX98357A handles all audio output from SphereAI:
+
+- **Conversational responses** — pyttsx3 TTS rendered to PCM and streamed via I2S
+- **Alert tones** — system-generated audio for medication, fall detection, and emergency notifications
+- **Adhkar playback** — pre-encoded audio files for Islamic remembrance sessions triggered by stress thresholds
+- **Salah call audio** — Adhan playback for prayer time notifications
+
+---
+
+## ESP32-S3 Wake-Word Engine
+
+The ESP32-S3 is the always-on acoustic sentinel of SphereAI. It runs **ESP-SR**, Espressif's on-device speech recognition framework, executing the wake-word detection model locally at minimal power draw. The RDK X5 is not involved in this stage — it can be in a reduced power state between interactions.
+
+### ESP-SR Wake-Word Pipeline
+
+```
+INMP441 ──I2S──► ESP32-S3 I2S Peripheral
+                       │
+                       ▼
+               16 kHz PCM buffer (ring buffer)
+                       │
+                       ▼
+               ESP-SR AFE (Audio Front End)
+               ├─ Acoustic Echo Cancellation
+               ├─ Noise Suppression
+               └─ Voice Activity Detection
+                       │
+                       ▼
+               Wake-word detection model
+               (WakeNet — quantized CNN)
+                       │
+               "Hey Sphere" detected?
+                  │           │
+                  YES         NO
+                  │           │
+                  ▼           └── continue ring buffer
+              UART TX
+              to RDK X5
+```
+
+ESP-SR's WakeNet model runs on the ESP32-S3's vector processor extensions. The model is quantized to INT8 and consumes approximately **1.5 MB of flash** and **500 KB of RAM** — well within the ESP32-S3's resources.
+
+### UART Handoff Protocol
+
+On wake-word detection, the ESP32-S3 transmits a single-byte event code to the RDK X5 over UART:
+
+```
+Baud rate:    115200
+Data bits:    8
+Parity:       None
+Stop bits:    1
+```
+
+```python
+# RDK X5 side — UART listener (Python, runs as daemon)
+
+WAKE_BYTE = 0xA5  # wake-word detection event
+
+def uart_listener(port='/dev/ttyS1', on_wake=None):
+    ser = serial.Serial(port, baudrate=115200, timeout=1)
+    while True:
+        byte = ser.read(1)
+        if byte and byte[0] == WAKE_BYTE:
+            if on_wake:
+                threading.Thread(target=on_wake, daemon=True).start()
+```
+
+The `on_wake` callback initiates the full SphereAI inference cycle: Whisper STT transcription, Voice Agent feature extraction, Biology Agent Firebase read, and MetaClassifier fusion.
+
+<Note>
+  The UART connection requires a **level shifter** if the RDK X5's UART I/O operates at a different voltage than the ESP32-S3's 3.3V GPIO. Verify your RDK X5 UART pin voltage before connecting directly.
+</Note>
+
+---
+
+## Whisper STT on RDK X5
+
+After wake-word trigger, the RDK X5 reads the audio buffer from the ESP32-S3 (via DMA or a dedicated I2S pass-through) and passes it to the Whisper STT pipeline.
+
+```python
+
+model = whisper.load_model("base")  # ~74M params — suitable for RDK X5
+
+def transcribe_audio(audio_np: np.ndarray, sr: int = 16000) -> str:
+    """
+    audio_np: float32 numpy array, values in [-1.0, 1.0]
+    sr: sample rate (Whisper expects 16000 Hz)
+    """
+    result = model.transcribe(audio_np, language="ar", task="transcribe")
+    # language="ar" for Arabic; set "en" or leave None for auto-detect
+    return result["text"]
+```
+
+<Note>
+  Whisper's `base` model supports multilingual transcription including Arabic, making it appropriate for residents whose primary language is Arabic or who mix Arabic and English in conversation. Set `language=None` to enable automatic language detection if the resident's language usage varies.
+</Note>
+
+---
+
+## pyttsx3 Text-to-Speech Output
+
+All SphereAI voice output is synthesized via **pyttsx3**, a cross-platform TTS library that operates fully offline. Synthesized audio is routed to the MAX98357A via the ESP32-S3's I2S output.
+
+```python
+
+engine = pyttsx3.init()
+engine.setProperty('rate', 150)    # words per minute — slower for clarity with elderly
+engine.setProperty('volume', 0.9)  # 0.0–1.0
+
+def speak(text: str):
+    engine.say(text)
+    engine.runAndWait()
+```
+
+For adhkar and Adhan audio — which require precise recitation rather than synthesis — SphereAI uses pre-encoded WAV files played directly through the audio pipeline rather than TTS synthesis.
+
+---
+
+## SSD1306 OLED Display
+
+The HollowRover includes a **SSD1306 128×64 OLED display** driven via **luma.oled** for visual emotional state feedback. This is a secondary output channel — the primary interface remains voice — but provides a visual cue that is useful for family members and caregivers present in the room.
+
+```python
+from luma.core.interface.serial import i2c
+from luma.oled.device import ssd1306
+from luma.core.render import canvas
+from PIL import ImageFont
+
+serial_interface = i2c(port=1, address=0x3C)
+device = ssd1306(serial_interface)
+
+EMOJI_MAP = {
+    'calm':      '😌 Calm',
+    'stressed':  '😰 Stressed',
+    'grief':     '😢 Grief',
+    'isolated':  '😶 Isolated',
+    'content':   '😊 Content',
+    'anxious':   '😟 Anxious',
+    'fatigued':  '😴 Fatigued',
+    'cognitive': '🧠 Cognitive',
+}
+
+def update_display(emotional_state: str, stress_level: float):
+    label = EMOJI_MAP.get(emotional_state, emotional_state)
+    with canvas(device) as draw:
+        draw.rectangle(device.bounding_box, outline="white", fill="black")
+        draw.text((5, 10), label, fill="white")
+        draw.text((5, 35), f"Stress: {stress_level:.0%}", fill="white")
+```
+
+The display updates after each MetaClassifier inference cycle, reflecting the current resolved emotional state and the Biology Agent's composite stress level.
+
+---
+
+## Bill of Materials — Voice Subsystem
+
+| Component | Part Number | Key Specs | Role |
+|---|---|---|---|
+| Digital MEMS Microphone | INMP441 | 24-bit, I2S, −26 dBFS sensitivity, 61 dB SNR | Audio capture |
+| I2S Class D Amplifier | MAX98357A | 3W, 4Ω, 92.5% efficiency, filterless | Audio output |
+| Speaker | Generic 3W 4Ω | 3W, 4Ω, 40mm diameter (recommended) | Sound transduction |
+| Microcontroller | ESP32-S3 | Xtensa LX7 dual-core, 512KB SRAM, 8MB flash | Wake-word + I2S bridge |
+| OLED Display | SSD1306 | 128×64, I2C, 3.3V | Emotional state visual feedback |
+
+<Warning>
+  Do not connect the MAX98357A's VDD directly to a 3.3V rail. The device is rated for 2.5V–5.5V, but at 3.3V its output power drops to approximately 0.9W into 4Ω — insufficient for reliable voice intelligibility in a noisy environment. Supply VDD from the rover's 5V power bus.
+</Warning>

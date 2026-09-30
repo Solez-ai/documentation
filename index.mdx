@@ -1,20 +1,66 @@
 ---
-title: "Introduction"
-description: "Welcome to your project"
+title: "LifeSphere: AI-Powered Autonomous Caregiving Ecosystem"
+sidebarTitle: "Home"
+description: "LifeSphere unifies biometric monitoring, autonomous robotics, emotional AI, perimeter security, and biology-responsive home automation into one caregiving organism."
 ---
 
-Write a short description of your product here. What it does, who it's for, and what they can accomplish with it.
+LifeSphere is a fully integrated autonomous caregiving ecosystem that monitors, predicts, and responds to the user across four simultaneous dimensions — medical, physical, emotional, and environmental — without requiring any interaction from the person being cared for. Five hardware subsystems share one real-time biological state backbone, enabling synchronized multi-dimensional responses that no combination of standalone devices can replicate.
 
-<Tip>
-  Ready to make this your own? Start by editing this page. Update your `docs.json` file to customize your site. Then fill out the [Quickstart](/quickstart) page.
-</Tip>
+<CardGroup cols={2}>
+  <Card title="Introduction" icon="book-open" href="/introduction">
+    Understand what LifeSphere is, the problem it solves, and how its five subsystems work as one organism.
+  </Card>
+  <Card title="System Architecture" icon="sitemap" href="/system-architecture">
+    Explore the distributed intelligence model, shared biological state, and multi-timescale inference architecture.
+  </Card>
+  <Card title="Quick Start" icon="rocket" href="/quickstart">
+    Deploy and configure your first LifeSphere node from hardware assembly to live Firebase data.
+  </Card>
+  <Card title="AI & Mathematics" icon="brain" href="/ai/pipeline-overview">
+    Deep-dive into the Isolation Forest, LSTM seizure predictor, trimodal classifier, and their mathematical foundations.
+  </Card>
+</CardGroup>
 
-<Card title="Quickstart" icon="rocket" href="/quickstart">
-  This card links to the quickstart page in your project.
-</Card>
-<Card title="Components" icon="puzzle-piece" href="https://mintlify.com/docs/components">
-  Add cards, callouts, steps, tabs, and more to design and structure your pages.
-</Card>
-<Card title="Settings" icon="gear" href="https://mintlify.com/docs/organize/settings">
-  Set your site name, branding, and navigation in the `docs.json` file.
-</Card>
+## The Five Subsystems
+
+<CardGroup cols={3}>
+  <Card title="Vital32" icon="heart-pulse" href="/vital32/overview">
+    14-sensor wearable biosensing layer. Predicts seizures, immune activation, and biological age in real time.
+  </Card>
+  <Card title="HollowRover" icon="robot" href="/hollowrover/overview">
+    Autonomous mobile robot with ROS2, SLAM, UWB precision localization, and a 6-DOF caregiving arm.
+  </Card>
+  <Card title="SphereAI" icon="microphone" href="/sphereai/overview">
+    Trimodal emotional intelligence fusing NLP, vocal prosody, and live biomarkers into adaptive companionship.
+  </Card>
+  <Card title="EntryGuard" icon="shield-halved" href="/entryguard/overview">
+    Multi-sensor perimeter security with facial recognition and floor-aware rover dispatch.
+  </Card>
+  <Card title="HollowCore" icon="house-signal" href="/hollowcore/overview">
+    Biology-responsive home automation mapping physiology directly to lighting, climate, and appliance control.
+  </Card>
+  <Card title="Firebase Backend" icon="database" href="/backend/firebase-architecture">
+    Real-time biological state synchronization layer connecting all five subsystems at ≤150 ms latency.
+  </Card>
+</CardGroup>
+
+## Get Started in Four Steps
+
+<Steps>
+  <Step title="Build Vital32">
+    Assemble the 14-sensor wearable on ESP32, flash the firmware, and verify live biometric data flowing to Firebase. See the [Vital32 Build Guide](/vital32/hardware).
+  </Step>
+  <Step title="Deploy HollowRover">
+    Set up the RDK X5 compute board, run ROS2 SLAM, register floor maps with UWB anchors, and validate autonomous navigation. See the [HollowRover Build Guide](/hollowrover/hardware).
+  </Step>
+  <Step title="Configure SphereAI & HollowCore">
+    Wire the voice hardware, install Python dependencies, and map biometric thresholds to home automation relays. See the [SphereAI Guide](/sphereai/overview) and [HollowCore Guide](/hollowcore/overview).
+  </Step>
+  <Step title="Integrate AI Models">
+    Train and deploy the Isolation Forest, Pre-Seizure LSTM, and Emotional Classifier as TFLite models. See the [AI Pipeline Overview](/ai/pipeline-overview).
+  </Step>
+</Steps>
+
+<Note>
+  LifeSphere is designed so that the user **never needs to interact with any technology** — the system responds entirely to biology. Every architectural decision in this documentation reflects that principle.
+</Note>

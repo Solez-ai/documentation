@@ -1,0 +1,153 @@
+---
+title: 'EntryGuard: Perimeter Security with Floor-Aware Dispatch'
+sidebarTitle: 'Overview'
+description: 'EntryGuard is a multi-sensor perimeter security layer that fuses PIR, ultrasonic, fire, gas, UWB, and facial recognition into floor-aware alert dispatch.'
+---
+
+<Warning>
+  Any escalated defensive action — arm-barrier deployment, external authority notification, or access restriction — requires explicit human authorization. EntryGuard detects and alerts; it does not act unilaterally against individuals.
+</Warning>
+
+EntryGuard is LifeSphere's perimeter intelligence layer: a network of multi-sensor nodes installed at every monitored entry point — doorways, corridor junctions, and stairwell access points — that continuously characterize the environment and the individuals entering it. Each node fuses motion, proximity, chemical, and barometric data into a structured alert payload enriched with UWB zone identity and a pressure-derived floor reference. HollowRover consumes these payloads directly to identify which floor map to load and which zone to navigate toward, giving the system end-to-end spatial accountability from the moment a perimeter event fires.
+
+---
+
+## Node Hardware
+
+Every EntryGuard node is a self-contained embedded system. There are no shared compute resources between nodes — each runs its own firmware on a dedicated ESP32 and publishes independently to Firebase.
+
+| Component | Part | Role |
+|---|---|---|
+| **Microcontroller** | ESP32 WROOM-32 | Sensor orchestration, Wi-Fi publish |
+| **Passive IR** | HC-SR501 | Motion detection, adjustable sensitivity |
+| **Ultrasonic ranging** | HC-SR04 | Proximity measurement to approaching subject |
+| **Fire sensor** | KY-026 | Analog flame/heat threshold detection |
+| **Gas sensor** | MQ-2 | Combustible gas concentration (LPG, methane, smoke) |
+| **UWB module** | DWM1000 | Zone identity tag — associates alert with spatial anchor |
+| **Barometric pressure** | BME688 | Pressure-derived floor reference for multi-floor dispatch |
+
+The **BME688** on each node records a pressure baseline at commissioning. On every alert publication, the node computes the current delta and appends a `floor_ref` field to the Firebase payload. HollowRover compares this value against its floor pressure baseline registry to select the correct SLAM map and UWB anchor geometry before dispatching.
+
+---
+
+## Sensor Event Pipeline
+
+<Steps>
+  <Step title="Continuous Polling">
+    The firmware polls the PIR output, reads analog values from the KY-026 flame sensor and MQ-2 gas sensor, and triggers an HC-SR04 ultrasonic pulse every 100 ms. All reads occur within the main loop under a single timing domain.
+  </Step>
+  <Step title="Threshold Evaluation">
+    Each sensor reading is compared against a compiled threshold constant. Motion events are gated by the current `systemMode` — polling continues regardless, but alerts are only published when the node is in `ACTIVE` mode. Fire and gas thresholds fire unconditionally: no mode gate suppresses a chemical event.
+  </Step>
+  <Step title="Alert Publication">
+    Qualifying events invoke `publishAlert()`, which constructs a JSON payload carrying the alert type, sensor magnitude, `nodeID`, UWB zone identifier, and `floor_ref`, then writes it to `/lifesphere/entryguard` over Wi-Fi. Fire and gas events additionally invoke `triggerBuzzer()` before returning.
+  </Step>
+  <Step title="HollowRover Dispatch">
+    HollowRover's Firebase subscriber receives the payload, extracts the `floor_ref` and UWB zone fields, loads the matching SLAM map and anchor geometry, and navigates to the alert zone without any manual routing input.
+  </Step>
+</Steps>
+
+---
+
+## Node Firmware
+
+The complete main-loop implementation running on each EntryGuard node:
+
+```cpp
+void loop() {
+  bool motion = digitalRead(PIR_PIN);
+  int fire = analogRead(FIRE_PIN);
+  int gas  = analogRead(GAS_PIN);
+  long dist = measureUltrasonic();
+
+  if (motion && systemMode == ACTIVE)
+    publishAlert("motion", dist, nodeID);
+
+  if (fire > FIRE_THRESHOLD) {
+    publishAlert("fire", fire, nodeID); triggerBuzzer();
+  }
+
+  if (gas > GAS_THRESHOLD) {
+    publishAlert("gas", gas, nodeID); triggerBuzzer();
+  }
+
+  delay(100);
+}
+```
+
+`publishAlert()` serializes the event type, sensor magnitude, `nodeID`, UWB zone tag, and `floor_ref` into a Firebase RTDB write. `triggerBuzzer()` asserts the buzzer GPIO for a fixed 500 ms pulse and returns — it does not block further sensor polling on the next cycle.
+
+---
+
+## Firebase Schema
+
+All EntryGuard state and event data is written under the `/lifesphere/entryguard` subtree:
+
+```json
+{
+  "lifesphere": {
+    "entryguard": {
+      "mode": "ACTIVE",
+      "intruder_detected": false,
+      "alerts": {
+        "<alert_id>": {
+          "type": "motion",
+          "magnitude": 42,
+          "node_id": "EG-NODE-03",
+          "uwb_zone": "ZONE_B2",
+          "floor_ref": 2,
+          "timestamp": 1718200000
+        }
+      }
+    }
+  }
+}
+```
+
+`mode` reflects the current system-wide arm state (`ACTIVE` | `DISARMED`). `intruder_detected` is set to `true` by the facial recognition pipeline when an unregistered face is confirmed — it is cleared only by an authorized operator. Each alert record carries the full spatial context HollowRover requires for autonomous dispatch.
+
+---
+
+## Facial Recognition
+
+EntryGuard nodes equipped with a USB camera feed frames to a **DeepFace** inference pipeline running on the RDK X5. The pipeline maintains an embedding registry of all registered occupants. On each face detection event, the incoming embedding is compared against the registry using cosine distance.
+
+- **Registered occupant**: match confirmed — no alert fired, event logged silently.
+- **Unregistered face**: three responses are triggered simultaneously and in parallel:
+  1. **Arm barrier** — HollowRover receives an arm-deploy command and swings its 6-DOF arm to the passive barrier position across the entry vector.
+  2. **Audible alarm** — the node's buzzer activates and the speaker output broadcasts a configurable alert tone.
+  3. **Push notification** — a structured notification is dispatched to the guardian's LifeSphere mobile app, carrying a frame capture, zone identity, and timestamp.
+
+The three responses are non-blocking with respect to each other. Arm deployment does not wait on notification delivery, and neither waits on the alarm.
+
+<Warning>
+  Arm barrier deployment is a passive physical deterrent — it obstructs an entry vector but applies no force to an individual. Any further escalation (external authority notification, active restraint) requires explicit authorization from a registered guardian within the LifeSphere app.
+</Warning>
+
+---
+
+## Fire and Gas Detection
+
+Chemical threat detection operates independently of motion gating and is never suppressed by `systemMode`. The KY-026 flame sensor outputs an analog voltage proportional to infrared radiation intensity from open flame; the MQ-2 outputs a voltage proportional to combustible gas concentration in the local atmosphere.
+
+| Sensor | Threshold Constant | Alert Type | Immediate Action |
+|---|---|---|---|
+| KY-026 | `FIRE_THRESHOLD` | `"fire"` | Buzzer + Firebase write with `floor_ref` |
+| MQ-2 | `GAS_THRESHOLD` | `"gas"` | Buzzer + Firebase write with `floor_ref` |
+
+Both alerts carry the node's `floor_ref` field so that building management systems and HollowRover can identify the precise floor of origin. The buzzer fires first — before the Firebase write completes — ensuring local audible warning is never delayed by network latency.
+
+---
+
+## Floor-Aware Dispatch Integration
+
+The architectural coupling between EntryGuard and HollowRover is mediated entirely by two fields in the alert payload: `uwb_zone` and `floor_ref`. No direct communication exists between the two subsystems — Firebase acts as the decoupled message bus.
+
+When HollowRover receives an alert:
+
+1. It reads `floor_ref` and compares against its pressure baseline registry to confirm the target floor.
+2. It loads the SLAM map and UWB anchor geometry registered to that floor.
+3. It uses `uwb_zone` to identify the target navigation region within the loaded map.
+4. It plans and executes a path to the zone using Nav2 with the standard 0.35 m safety inflation radius.
+
+This architecture means EntryGuard nodes require no knowledge of HollowRover's state, map, or current position — and HollowRover requires no real-time communication link to EntryGuard. The system degrades gracefully: if HollowRover is unavailable, alerts are still published and visible to guardians. If a single EntryGuard node loses Wi-Fi, all other nodes continue operating independently.

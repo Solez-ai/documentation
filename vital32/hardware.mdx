@@ -1,0 +1,140 @@
+---
+title: "Vital32 Hardware Assembly and Wiring Guide"
+sidebarTitle: "Hardware"
+description: "Step-by-step component list, I²C wiring map, power architecture, and assembly notes for the Vital32 14-sensor biosensing wearable."
+---
+
+This page details every physical component, connection, and power rail required to build a functional Vital32 unit. All wiring specifications are exact — follow them precisely to avoid I²C bus conflicts, ADC noise, or regulator thermal issues.
+
+---
+
+## Bill of Materials
+
+The table below lists every component used in the Vital32 reference build. Quantities are for a single wearable unit.
+
+| Component | Part Number / Model | Interface | I²C Address | Qty |
+|---|---|---|---|---|
+| Microcontroller | ESP32 WROOM-32 DevKit v1 | — | — | 1 |
+| Pulse Oximeter / HR | MAX30102 breakout | I²C | `0x57` | 1 |
+| IMU | MPU6050 breakout (GY-521) | I²C | `0x68` | 1 |
+| IR Temperature | MLX90614ESF-BAA breakout | I²C | `0x5A` | 1 |
+| Gas / Humidity / Pressure | BME688 breakout | I²C | `0x76` | 1 |
+| UV Index | VEML6075 breakout | I²C | `0x10` | 1 |
+| Galvanic Skin Response | Grove GSR Sensor v1.0 | ADC | GPIO 35 | 1 |
+| Bioelectrical Impedance | AD5933 evaluation breakout | I²C | `0x0D` | 1 |
+| OLED Display | SSD1306 0.96″ 128×64 | I²C | `0x3C` | 1 |
+| Battery | 3.7 V 1000 mAh LiPo (JST-PH 2.0) | — | — | 1 |
+| Charge Controller | TP4056 USB-C module with protection | — | — | 1 |
+| LDO Regulator | AMS1117-3.3 SOT-223 | — | — | 1 |
+| Pull-up Resistors | 4.7 kΩ through-hole (×2) | — | — | 2 |
+| Decoupling Capacitors | 100 nF ceramic (×6), 10 µF electrolytic (×2) | — | — | 8 |
+
+---
+
+## Wiring and Pin Configuration
+
+All seven I²C peripherals share a single bus. Two 4.7 kΩ pull-up resistors connect SDA and SCL each to 3.3 V — do **not** install additional pull-ups on individual breakout boards; remove or lift the onboard resistors if they are populated.
+
+```cpp
+// ─────────────────────────────────────────────
+// I²C Bus (shared across all seven modules):
+// ─────────────────────────────────────────────
+GPIO21 (SDA) -> MAX30102 SDA
+              -> MPU6050 SDA
+              -> MLX90614 SDA
+              -> BME688 SDA
+              -> VEML6075 SDA
+              -> AD5933 SDA
+              -> SSD1306 SDA
+
+GPIO22 (SCL) -> MAX30102 SCL
+              -> MPU6050 SCL
+              -> MLX90614 SCL
+              -> BME688 SCL
+              -> VEML6075 SCL
+              -> AD5933 SCL
+              -> SSD1306 SCL
+
+3.3V  -> VCC of all I²C modules
+GND   -> GND of all I²C modules
+
+// ─────────────────────────────────────────────
+// Analog Input:
+// ─────────────────────────────────────────────
+GPIO35 (ADC1_CH7)  -> Grove GSR v1.0 signal output (SIG pin)
+3.3V               -> Grove GSR VCC
+GND                -> Grove GSR GND
+
+// ─────────────────────────────────────────────
+// Power Rail (charging and regulation):
+// ─────────────────────────────────────────────
+LiPo 3.7V (+)  -> TP4056 BAT+
+LiPo 3.7V (-)  -> TP4056 BAT-
+
+TP4056 OUT+    -> AMS1117-3.3 VIN
+TP4056 OUT-    -> AMS1117-3.3 GND (common ground)
+
+AMS1117-3.3 VOUT -> ESP32 3V3 pin
+                 -> 3.3V power rail for all sensors
+
+USB-C port     -> TP4056 IN+ / IN-  (charging input)
+```
+
+<Note>
+  All seven I²C sensors coexist on a single SDA/SCL pair because each carries a distinct 7-bit address: `0x57`, `0x68`, `0x5A`, `0x76`, `0x10`, `0x0D`, and `0x3C`. The ESP32's I²C master arbitrates access sequentially — no multiplexer or bus switch is required. Confirm addresses at boot by running an I²C scanner sketch before flashing production firmware.
+</Note>
+
+---
+
+## Power Architecture
+
+Vital32 uses a three-stage power chain designed to safely charge a single-cell LiPo battery and deliver stable 3.3 V to all components, including during simultaneous USB charging and operation.
+
+```
+LiPo 3.7V
+    │
+    ▼
+TP4056 USB-C (charge controller + protection IC)
+    │  Regulated 4.2V charge profile, over-current, over-voltage,
+    │  and short-circuit protection integrated.
+    ▼
+AMS1117-3.3 (LDO linear regulator)
+    │  Input: 3.7–4.2V from TP4056 OUT
+    │  Output: 3.3V ±1%, up to 800 mA continuous
+    │  Dropout: ~1.0V typical — adequate across full LiPo discharge curve
+    ▼
+ESP32 3V3 rail + all sensor VCC lines
+```
+
+**Design notes:**
+
+- The TP4056 module with onboard DW01A protection chip handles cell-level battery management. Do not connect the LiPo directly to the ESP32 `VIN` pin, which expects a 5 V input and bypasses protection logic.
+- The AMS1117-3.3 SOT-223 package dissipates heat proportional to the voltage drop across it. At full sensor load (~220 mA peak), the dropout power is approximately $(4.2 - 3.3) \times 0.22 = 0.20\text{ W}$ — within the package rating without a heatsink at room temperature.
+- Place a 10 µF electrolytic capacitor on the AMS1117 input rail and a 10 µF capacitor on the output rail, each with a parallel 100 nF ceramic for high-frequency decoupling. This prevents oscillation under rapidly switching sensor loads.
+- The ESP32 draws transient peaks of up to 500 mA during Wi-Fi transmission. The output capacitor bank on the AMS1117 must be sufficient to supply this pulse without dropping below the ESP32's 3.0 V brownout threshold.
+
+---
+
+## Assembly Sequence
+
+<Steps>
+  <Step title="Prepare the I²C bus wires">
+    Cut two lengths of 26 AWG wire for SDA and SCL. Daisy-chain all seven I²C breakout boards in parallel — keep traces short to minimise capacitance on the bus. Install the two 4.7 kΩ pull-up resistors between SDA→3.3V and SCL→3.3V at a single point near the ESP32 header.
+  </Step>
+  <Step title="Wire the ADC channel">
+    Connect the Grove GSR v1.0 SIG pin directly to GPIO 35. GPIO 35 is an input-only pin on the ESP32 and is routed to ADC1, which operates correctly when Wi-Fi is active (ADC2 channels do not). Do not add series resistance in this path — the 12-bit ADC input impedance is sufficient for the GSR output.
+  </Step>
+  <Step title="Assemble the power chain">
+    Solder the LiPo JST connector to the TP4056 BAT+ and BAT− pads. Connect TP4056 OUT+ and OUT− to the AMS1117 input and ground respectively. Bridge AMS1117 VOUT to the ESP32 3V3 pin and the shared sensor power rail. Install all decoupling capacitors close to the regulator pads.
+  </Step>
+  <Step title="Mount the SSD1306 OLED">
+    The OLED shares the I²C bus at address `0x3C`. Mount it on the outer face of the wristband enclosure using M1.6 standoffs. The firmware writes vitals and alert states to it on every 1-second tick.
+  </Step>
+  <Step title="Verify with I²C scanner">
+    Before flashing production firmware, upload a simple I²C scanner sketch. You should see exactly seven addresses respond: `0x0D`, `0x10`, `0x3C`, `0x57`, `0x5A`, `0x68`, `0x76`. Any missing address indicates a wiring fault or missing pull-up.
+  </Step>
+</Steps>
+
+<Warning>
+  Never connect the LiPo battery while USB is plugged in until you have verified that the TP4056 protection circuit is intact and that `BAT+`/`BAT−` are not reversed. A reversed LiPo connection will destroy the protection IC and may cause cell venting.
+</Warning>

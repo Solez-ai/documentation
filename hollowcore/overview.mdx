@@ -1,0 +1,102 @@
+---
+title: 'HollowCore: Biology-Responsive Home Automation'
+sidebarTitle: 'Overview'
+description: 'HollowCore maps physiological state to home environment actions, automating lighting, climate, and door security from a live biological signal.'
+---
+
+<Note>
+  HollowCore operates entirely in the background. No user interaction is required for its primary automation loop — the home adapts to the occupant's measured biology without explicit commands.
+</Note>
+
+HollowCore is the environment and financial automation layer of the LifeSphere ecosystem. Where Vital32 measures the body and SphereAI interprets intent, HollowCore closes the feedback loop by translating the shared biological state object into physical changes in the home — adjusting lighting, climate, door security, and appliance power in direct response to measured physiological parameters. From the occupant's perspective, the home becomes a living system that mirrors their internal state: dimming automatically under cortisol elevation, locking down during sleep onset, raising the thermostat when skin temperature drops.
+
+The system additionally extends LifeSphere's protective scope to financial security, applying the same anomaly-detection philosophy used for biometric signals to transaction monitoring — flagging out-of-pattern spending in real time and requiring multi-factor biometric authorization before high-risk transactions are approved.
+
+---
+
+## Hardware
+
+HollowCore's physical automation layer runs on an **ESP32 WROOM-32** controlling a bank of relay modules. The ESP32 connects to the home Wi-Fi network and subscribes to the **Mosquitto MQTT broker** hosted on the RDK X5 — the same compute board running HollowRover's ROS2 stack. This co-hosting arrangement means the MQTT broker and the rover's decision engine share a LAN segment with sub-millisecond message latency.
+
+| Component | Role |
+|---|---|
+| ESP32 WROOM-32 | Relay control, MQTT subscriber, Firebase reader |
+| 5-channel relay module | Switches mains-voltage loads (lighting, HVAC, AV, door lock) |
+| Mosquitto MQTT broker (RDK X5) | Message bus for command delivery |
+| ILI9488 TFT LCD (3.5", 480×320) | Medication dispenser HMI touchscreen |
+| XPT2046 touch controller | Resistive touch input for the dispenser UI |
+
+---
+
+## GPIO Relay Assignments
+
+Each relay channel is mapped to a fixed GPIO pin on the ESP32. Pin assignments are compiled constants — they do not change at runtime.
+
+```cpp
+GPIO26 -> Relay 1 IN (Living room light)
+GPIO27 -> Relay 2 IN (Bedroom light)
+GPIO14 -> Relay 3 IN (AC/fan)
+GPIO12 -> Relay 4 IN (TV power)
+GPIO13 -> Relay 5 IN (Main door lock solenoid)
+```
+
+Relay coils are driven at 3.3 V logic from the ESP32 GPIO — a transistor buffer on each relay module channel provides the current amplification needed to actuate the relay without loading the ESP32's output stage. The door lock solenoid on GPIO13 is treated as a safety-critical load: its state is both written locally and confirmed via Firebase read-back before the relay is considered settled.
+
+---
+
+## MQTT Command Interface
+
+HollowCore accepts device control commands on a single MQTT topic:
+
+| Field | Value |
+|---|---|
+| **Topic** | `lifesphere/hollowcore/command` |
+| **QoS** | 1 (at-least-once delivery) |
+| **Payload format** | JSON |
+| **Retained** | No |
+
+Example payload:
+
+```json
+{
+  "device": "light_1",
+  "state": true
+}
+```
+
+Valid `device` identifiers: `light_1`, `light_2`, `ac`, `tv`, `door_lock`. The `state` field accepts a boolean for binary loads and a numeric value (0–255) for dimmable loads. Commands may originate from SphereAI (voice command resolution), the biometric automation loop (physiological trigger), or the HollowRover OLED interface (manual override during a caregiving protocol).
+
+---
+
+## Operational Model
+
+HollowCore runs two concurrent execution paths:
+
+1. **Biometric automation loop** — polls the shared `/lifesphere/vital32` Firebase object at a configurable interval (default 500 ms) and evaluates all physiological thresholds. Qualifying conditions immediately publish relay commands via MQTT and, where appropriate, forward commands to SphereAI's audio subsystem.
+
+2. **Financial monitoring loop** — subscribes to incoming transaction events from connected banking APIs, runs each transaction through the Isolation Forest anomaly scorer, and publishes flagged events to `/lifesphere/hollowcore` for subscriber pickup. High-risk transactions additionally trigger multi-factor biometric authorization before proceeding.
+
+Neither loop blocks the other. The ESP32 relay controller and the analytical backends operate independently, connected only through the shared MQTT and Firebase buses.
+
+---
+
+## Subsystem Pages
+
+<CardGroup cols={2}>
+  <Card
+    title="Biometric Automation"
+    icon="heart-pulse"
+    href="/hollowcore/biometric-automation"
+    color="#ef7025"
+  >
+    Full mapping logic, threshold table, implementation firmware, sleep detection algorithm, and the ILI9488 medication dispenser HMI.
+  </Card>
+  <Card
+    title="Financial Security"
+    icon="shield-halved"
+    href="/hollowcore/financial-security"
+    color="#4fa1ab"
+  >
+    Isolation Forest anomaly detection, smart notification pipeline, and three-factor biometric transaction authorization.
+  </Card>
+</CardGroup>

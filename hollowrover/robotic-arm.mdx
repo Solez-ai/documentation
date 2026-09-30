@@ -1,0 +1,202 @@
+---
+title: 'HollowRover 6-DOF Robotic Arm: Caregiving and Security'
+sidebarTitle: 'Robotic Arm'
+description: 'Six-degree-of-freedom arm specification, caregiving assist and passive security barrier modes, LiDAR occlusion constraints, and safety protocol for HollowRover.'
+---
+
+
+<Warning>
+  The robotic arm operates exclusively in **passive** configurations. It is mechanically and programmatically prohibited from initiating contact with any person. Read the safety constraints section before modifying arm behavior in any protocol node.
+</Warning>
+
+HollowRover's 6-DOF arm extends the rover's caregiving capability from navigation-only to **physical world interaction** — retrieving objects, presenting medication, and establishing visible deterrent barriers. It is not a general-purpose manipulator; its joint geometry and named pose library are purpose-built for the specific physical tasks that arise in autonomous caregiving.
+
+---
+
+## Joint Specification
+
+| Joint | Label | Actuator | Degrees of Freedom | Primary Motion |
+|---|---|---|---|---|
+| **Joint 1** | Base Rotation | MG996R | ±180° | Horizontal sweep — left/right yaw |
+| **Joint 2** | Shoulder | MG996R | 0°–180° | Vertical elevation from chassis |
+| **Joint 3** | Elbow | MG996R | 0°–150° | Forearm extension / retraction |
+| **Joint 4** | Wrist Pitch | MG996R | ±90° | Payload tilt — leveling objects during delivery |
+| **Joint 5** | Wrist Roll | MG996R | ±90° | Rotational alignment for gripper approach |
+| **Joint 6** | Gripper | MG90S | 0°–60° | Open / close end-effector |
+
+All joints 1–5 use **MG996R** metal-gear servos (11 kg·cm stall torque at 6 V). Joint 6 uses an **MG90S** micro servo — sufficient for the gripper's light grasping loads (medication cups, small objects) while reducing distal arm weight to keep center-of-mass close to the rover chassis during extension.
+
+The arm is mounted at the **forward-right quadrant** of the rover chassis, positioned so that the barrier pose (Joint 1 swept 90° left, arm fully extended horizontally) spans the rover's full lateral profile across a doorway or corridor.
+
+---
+
+## LiDAR Occlusion Constraint
+
+The STL-19P TOF LiDAR sits atop the rover mast and scans a horizontal plane approximately 120 mm above the chassis deck. The arm in its **stow pose** sits fully below this scan plane — joints folded inward, gripper retracted against the chassis side.
+
+<Warning>
+  **Navigation and arm-deployment states are mutually exclusive.** The arm must be confirmed in the stow pose (all joint angles within ±3° of stow values, verified by servo position feedback) before any Nav2 navigation goal is issued. Conversely, no arm motion command is accepted while a Nav2 goal is active. This constraint is enforced in `hollowrover_arm/arm_controller.py` via an interlock flag that reads the Nav2 action server state before accepting any joint trajectory.
+
+  Violating this constraint allows the arm to enter the LiDAR scan plane during navigation, introducing phantom obstacles into the costmap and causing Nav2 to enter an irrecoverable replanning loop.
+</Warning>
+
+The interlock logic is explicit in the controller:
+
+```python
+def accept_trajectory(self, trajectory: JointTrajectory) -> bool:
+    """
+    Gate arm motion commands behind a navigation-idle check.
+    Returns True only when Nav2 is neither active nor in recovery.
+    """
+    nav_state = self.nav2_client.get_state()
+    if nav_state in (GoalStatus.STATUS_EXECUTING, GoalStatus.STATUS_CANCELING):
+        self.get_logger().warn(
+            "Arm trajectory rejected: navigation goal is active. "
+            "Stow the arm before issuing navigation goals, or cancel "
+            "navigation before commanding arm motion."
+        )
+        return False
+    return True
+```
+
+---
+
+## Named Pose Library
+
+The arm controller exposes a library of named poses for all protocol-driven motions. Each pose is a dictionary of joint angles in degrees; the controller interpolates to the target pose at a configurable speed.
+
+```python
+# hollowrover_arm/poses.py
+
+POSES = {
+
+    "stow": {
+        "base": 0, "shoulder": 10, "elbow": 10,
+        "wrist_pitch": 0, "wrist_roll": 0, "gripper": 0
+    },
+
+    # Present medication cup at ~70 cm height, angled toward user
+    "medication_present": {
+        "base": 45, "shoulder": 110, "elbow": 80,
+        "wrist_pitch": -20, "wrist_roll": 0, "gripper": 60
+    },
+
+    # Reach downward to retrieve a dropped object from floor level
+    "floor_retrieve": {
+        "base": 0, "shoulder": 160, "elbow": 140,
+        "wrist_pitch": 30, "wrist_roll": 0, "gripper": 60
+    },
+
+    # Horizontal barrier across doorway / corridor — security mode only
+    "passive_barrier": {
+        "base": 90, "shoulder": 85, "elbow": 170,
+        "wrist_pitch": 0, "wrist_roll": 0, "gripper": 0
+    },
+
+    # Cushion deployment: arm extended low and forward for pre-seizure intercept
+    "cushion_deploy": {
+        "base": 0, "shoulder": 135, "elbow": 120,
+        "wrist_pitch": 45, "wrist_roll": 0, "gripper": 30
+    }
+}
+```
+
+---
+
+## Operating Modes
+
+<Tabs>
+  <Tab title="Caregiving Assist">
+    ### Object Retrieval
+
+    When a care recipient drops an object, BioPulse wearable data or a manual button press triggers the `floor_retrieve` protocol. The rover navigates to within 30 cm of the detected drop location (via RGB camera + depth from TF-Luna), confirms the object is within gripper range, moves to `floor_retrieve` pose, closes the gripper, and returns to `medication_present` height to hand the object back.
+
+    Grasp confirmation uses TF-Luna distance: if the distance reading at wrist level decreases by more than 5 cm after gripper close, the grasp is considered successful. On failure, the rover opens the gripper, adjusts base rotation by ±10° and retries once before escalating to a guardian notification.
+
+    ### Medication and Water Delivery
+
+    On a scheduled dispensing event, the arm remains stowed while the rover navigates to the user's UWB-confirmed position. Once stationary, the dispenser releases the correct slot (see [Medication Dispenser](/hollowrover/medication-dispenser)), and the arm moves to `medication_present` — holding the cup at accessible height (~70 cm) with wrist pitch leveling the cup. The peristaltic pump delivers water into an attached cup on command.
+
+    The arm holds the `medication_present` pose until either:
+    - The user takes the medication (gripper force feedback drops below threshold), or
+    - A 60-second timeout elapses, after which a guardian notification is sent and the arm retracts to stow
+  </Tab>
+  <Tab title="Passive Security Barrier">
+    ### Trigger Pipeline
+
+    The security barrier mode is activated exclusively by a confirmed unregistered-face detection event:
+
+    <Steps>
+      <Step title="TF-Luna presence detection">
+        The TF-Luna ToF sensor (0.2–8 m range) mounted at chokepoints detects a person crossing the detection threshold. This pre-filters the recognition pipeline — DeepFace inference only runs when a physical presence is confirmed, preventing false triggers from images or video.
+      </Step>
+      <Step title="DeepFace recognition">
+        The RDK X5 NPU runs the DeepFace recognition pipeline on the USB RGB camera feed. The identity is checked against the registered-faces database. A match to any registered household member suppresses all further security actions.
+      </Step>
+      <Step title="Unregistered identity confirmed">
+        If no match is found after two consecutive frames (to prevent single-frame misclassification), the `security_barrier.py` protocol node fires.
+      </Step>
+      <Step title="Simultaneous three-part response">
+        All three of the following activate in the same ROS2 callback, with no sequencing delay between them:
+        1. Arm moves from stow to `passive_barrier` pose
+        2. Audible alarm activates via the onboard speaker GPIO
+        3. Push notification with live RGB camera frame sent to guardian's phone via Firebase Cloud Messaging
+      </Step>
+    </Steps>
+
+    ### What the Barrier Does and Does Not Do
+
+    The `passive_barrier` pose extends the arm horizontally across the rover's forward facing — creating a **visible physical presence** that signals access restriction. It does not grip, push, restrain, or contact any person under any circumstances.
+
+    <Warning>
+      **The arm is a passive deterrent only.** The following actions are explicitly prohibited by design and are not accessible via any software interface:
+      - Extending the arm to block egress (only ingress deterrence is permitted)
+      - Closing the gripper on a person or any body part
+      - Applying force against a person in any direction
+      - Activating the barrier without simultaneously notifying a human guardian
+
+      **All escalation beyond the three simultaneous passive responses requires explicit human authorization.** The guardian must actively confirm in the mobile app before any additional action is taken. This design is intentional and not a limitation to be worked around.
+    </Warning>
+
+    The rover holds the `passive_barrier` pose and continues streaming camera feed until the guardian either dismisses the alert (arm returns to stow) or escalates (which triggers emergency services notification — a separate system action outside the arm's scope).
+  </Tab>
+</Tabs>
+
+---
+
+## Safety Constraint Summary
+
+The following constraints are simultaneously active whenever the arm is in any non-stow pose. All three must hold for the barrier response to be considered valid.
+
+| # | Constraint | Enforcement Mechanism |
+|---|---|---|
+| **1** | Arm moves to passive barrier only — no contact, grasping, restraining, or striking | Named pose library; no joint trajectory bypasses `arm_controller.py` |
+| **2** | Audible alarm activates | Same callback as barrier deployment; cannot be disabled independently |
+| **3** | Guardian push notification with live camera feed | Firebase Cloud Messaging — confirmed delivery required before protocol completes |
+
+No single constraint can activate without the other two. The protocol node uses a `asyncio.gather` coroutine that launches all three concurrently and awaits all three confirmations before marking the response complete. If any of the three fails (e.g., push notification delivery fails due to connectivity), the system logs a `SECURITY_RESPONSE_PARTIAL` event and retries the failed component at 5-second intervals.
+
+---
+
+## Arm Control Node Architecture
+
+```
+/arm_command (JointTrajectory)
+        │
+        ▼
+arm_controller.py
+  ├── navigation_interlock_check()     ← Blocks if Nav2 active
+  ├── validate_joint_limits()          ← Enforces per-joint angle bounds
+  ├── interpolate_trajectory()         ← Smooth joint-space interpolation
+  └── publish to manipulator_serial_node
+              │
+              ▼ UART (115200 baud)
+        Manipulator ESP32
+              │
+    ┌─────────┴─────────┐
+    │                   │
+  Arm servos         Dispenser / pump
+  (GPIO13–33)        (GPIO16–19, GPIO12)
+```
+
+The arm controller publishes joint state feedback on `/arm_joint_states` at 20 Hz — consumed by both the URDF visualization in RViz and the safety interlock logic. Any discrepancy between commanded and reported joint angle exceeding 10° for more than 500 ms triggers a `JointFault` diagnostic and halts further arm commands until the fault is acknowledged.

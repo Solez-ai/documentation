@@ -1,0 +1,101 @@
+---
+title: 'LifeSphere: Autonomous Caregiving for the Whole Person'
+sidebarTitle: 'Introduction'
+description: 'LifeSphere is a five-subsystem AI caregiving ecosystem that monitors, reasons about, and responds to human biology without requiring user interaction.'
+---
+
+
+LifeSphere is a closed-loop autonomous caregiving ecosystem purpose-built for elderly individuals living alone. It fuses biosensing hardware, mobile robotics, emotional AI, physical security, and environmental automation into a single coherent system governed by one architectural contract: the shared biological state. Every subsystem reads from and writes to a real-time representation of the resident's physiology, affect, and context. No subsystem acts in isolation. No alert goes uncontextualized. No deterioration goes unwitnessed.
+
+## The Problem LifeSphere Solves
+
+<Info>
+  Bangladesh is home to more than **15 million elderly individuals living alone** — a population growing faster than the formal caregiving infrastructure can serve. The global picture is equally stark: silent health deterioration, unwitnessed falls, medication non-adherence, and compounding social isolation claim preventable lives every day.
+</Info>
+
+The failure mode of conventional eldercare is not dramatic — it is quiet. A cardiac anomaly develops over six hours before a crisis. A missed dose accumulates into a systemic complication over six days. A resident who has not spoken to another person in four days registers no alert in any existing system. Standard medical alert devices wait for the user to press a button. Smart speakers wait for a wake word. Neither mechanism is available to a person who has fallen unconscious, whose hands tremble, or who simply does not think to reach for help until it is too late.
+
+LifeSphere addresses four failure vectors simultaneously:
+
+- **Silent physiological deterioration** — continuous multi-parameter biosensing with ML-driven anomaly detection flags subclinical changes before they become emergencies
+- **Medication non-adherence** — the HollowRover autonomously dispenses medication on schedule and verifies ingestion
+- **Unwitnessed falls and seizures** — tri-axis accelerometry, HRV signal analysis, and probabilistic seizure models trigger immediate intervention
+- **Emotional and cognitive decline** — SphereAI monitors loneliness, stress, and cognitive coherence across every interaction
+
+## The Five Subsystems
+
+<CardGroup cols={2}>
+  <Card
+    title="Vital32"
+    icon="heart-pulse"
+    href="/vital32/overview"
+  >
+    An ESP32-based biosensing wearable that measures heart rate, SpO₂, HRV, skin temperature, galvanic skin response, bioimpedance, and barometric floor position at sub-second resolution. The primary source of truth for the shared biological state.
+  </Card>
+  <Card
+    title="HollowRover"
+    icon="robot"
+    href="/hollowrover/overview"
+  >
+    A ROS2-navigated autonomous ground robot with a 5-DOF manipulator arm and carousel medication dispenser. Navigates the resident's floor plan via SLAM, delivers medication, and serves as the ecosystem's physical response actuator.
+  </Card>
+  <Card
+    title="SphereAI"
+    icon="brain"
+    href="/sphereai/overview"
+  >
+    The ecosystem's emotional and cognitive intelligence layer. A tri-agent fusion of GPT-4o, Claude 3 Opus, and Gemini 1.5 Pro produces consensus emotional state assessments, loneliness indices, and context-aware conversational responses.
+  </Card>
+  <Card
+    title="EntryGuard"
+    icon="shield-halved"
+    href="/entryguard/overview"
+  >
+    A local-processing security subsystem combining facial recognition, RF jamming detection, and a smart lock controller. All biometric computation runs on-device — no face data is ever transmitted to any external service.
+  </Card>
+  <Card
+    title="HollowCore"
+    icon="house-signal"
+    href="/hollowcore/overview"
+  >
+    The home automation layer that closes the biofeedback loop between physiology and environment. HollowCore adjusts ambient temperature, fan speed, lighting, and financial account monitoring in direct response to the resident's real-time biological state.
+  </Card>
+</CardGroup>
+
+## The Core Principle
+
+> *LifeSphere does not require the user to interact with technology. It requires technology to respond to the user's biology.*
+
+This is not a design convenience — it is a safety requirement. An elderly resident experiencing a hypertensive crisis, a seizure prodrome, or a hypoglycemic episode cannot be expected to navigate an interface, articulate a request, or remember a procedure. Any system that depends on voluntary user action has already failed the population it was built to serve.
+
+LifeSphere's architecture operationalizes this principle through three design decisions:
+
+1. **Passive sensing is the primary modality.** Vital32 samples physiological parameters continuously from a wristband. The resident does not configure, initiate, or dismiss anything. The data flows regardless of cognitive or physical state.
+
+2. **Inference happens in the background, at multiple timescales.** Short-cycle inference (every 30 seconds) catches acute anomalies. Medium-cycle inference (every 15 minutes) tracks trending deterioration. Long-cycle inference (every 24 hours) updates the resident's biological age model and risk priors.
+
+3. **Actuation is autonomous but human-supervised.** The ecosystem dispatches the HollowRover, adjusts the environment, and contacts emergency services without requiring the resident to ask. However, every *defensive* action — engaging security locks, triggering GSM alerts — requires mandatory human authorization before execution.
+
+<Tip>
+  You can read the full authorization protocol, including the escalation chain and the conditions under which autonomous action is permitted without prior confirmation, in the [EntryGuard Security Model](/entryguard/overview).
+</Tip>
+
+## Clinical and Social Impact
+
+Reactive healthcare is structurally incapable of preventing the class of events LifeSphere is designed to intercept. A fall that goes undiscovered for eight hours produces a categorically different clinical outcome than the same fall discovered in under two minutes. A loneliness index that has climbed above 0.70 for three consecutive days is a clinical signal — but it is invisible to every system that only measures what the resident reports.
+
+LifeSphere shifts the caregiving paradigm from reactive to **continuously proactive**:
+
+| Intervention Mode | Response Trigger | Typical Latency |
+|---|---|---|
+| Reactive (conventional) | User-initiated alert | Minutes to hours |
+| Proactive (threshold-based) | Single-parameter threshold breach | ~60 seconds |
+| **Predictive (LifeSphere)** | **Multi-parameter anomaly + trend inference** | **&lt;150 ms detection, &lt;2 min dispatch** |
+
+<Note>
+  The 150 ms latency target refers to the time between a sensor event being written to the Firebase Realtime Database and the first downstream subsystem receiving and processing the update. Physical response time (HollowRover reaching the resident) depends on floor plan geometry and is modeled separately in the navigation subsystem.
+</Note>
+
+The system's architecture is designed to remain operational through power failures, Wi-Fi outages, and hardware degradation. A 5000 mAh LiPo backup sustains operation through grid interruption. A local 24-hour SD card buffer ensures no biometric record is lost during connectivity gaps. A GSM fallback module maintains emergency communication when broadband is unavailable.
+
+LifeSphere does not replace human caregivers. It ensures that no hour goes unmonitored between them.

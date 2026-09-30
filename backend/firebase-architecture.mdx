@@ -1,0 +1,192 @@
+---
+title: 'Firebase Realtime Database: LifeSphere Biological State Backbone'
+sidebarTitle: 'Firebase Architecture'
+description: 'How Firebase Realtime Database serves as the central nervous system binding all five LifeSphere subsystems through a shared, live biological state tree.'
+---
+
+
+Firebase Realtime Database is not merely a persistence layer in LifeSphere — it is the architectural contract between every subsystem. Each of the five nodes — Vital32, SphereAI, HollowRover, HollowCore, and EntryGuard — reads from and writes to a single JSON tree rooted at `/lifesphere`. There is no point-to-point messaging between subsystems. There is no bespoke API. Every subsystem speaks to a single shared representation of biological reality, and every change propagates to all listeners within a target latency of 150 milliseconds.
+
+This model enforces coherence by construction: a fall event written by Vital32 at `/lifesphere/vital32/fall_detected` is immediately visible to SphereAI (which escalates emotional triage), HollowRover (which navigates to the resident), and the guardian notification layer — without any subsystem explicitly invoking another.
+
+## Project Setup
+
+<Steps>
+  <Step title="Create the LifeSphere Firebase project">
+    Navigate to [console.firebase.google.com](https://console.firebase.google.com) and create a new project named **LifeSphere**. Disable Google Analytics during setup — LifeSphere does not require analytics and the additional data surface increases your compliance footprint unnecessarily.
+  </Step>
+
+  <Step title="Enable Realtime Database in the asia-southeast1 region">
+    In the left-hand console navigation, open **Build → Realtime Database** and click **Create Database**. When prompted for a location, select **Singapore (asia-southeast1)**. This minimises round-trip latency for devices deployed in South and Southeast Asia. Choose **Start in locked mode** — you will apply authenticated-only rules immediately in the next step.
+  </Step>
+
+  <Step title="Set authenticated-only security rules">
+    Open the **Rules** tab inside Realtime Database and replace the default rules with the following. This enforces that only authenticated Firebase users — your service account and the app — can perform any read or write operation on the database:
+
+    ```json
+    {
+      "rules": {
+        ".read":  "auth !== null",
+        ".write": "auth !== null"
+      }
+    }
+  ```
+
+    Click **Publish**. The database is now inaccessible without a valid Firebase auth token.
+  </Step>
+
+  <Step title="Download the service account key for the Python SDK">
+    Navigate to **Project Settings → Service Accounts**. Click **Generate new private key** and confirm. Save the downloaded JSON as `serviceAccountKey.json`. This file grants admin-level access to your entire Firebase project — treat it as a production secret and never commit it to version control. Store it in your secrets manager or inject it as an environment variable at runtime.
+  </Step>
+
+  <Step title="Retrieve the Web API key for the ESP32 REST interface">
+    Navigate to **Project Settings → General**. Under **Your apps**, register a new Web app if you have not already. Your **Web API Key** appears at the top of the General tab. This key is used by the ESP32's `FirebaseESP32` library to authenticate with the Firebase REST API over HTTPS from the wearable.
+  </Step>
+</Steps>
+
+<Warning>
+  **Never leave your Realtime Database open in production.** The default locked-mode rules deny all access, but it is trivially easy to accidentally publish `".read": true` or `".write": true` while debugging. An open database exposes every resident's physiological, emotional, and behavioural data publicly. Always confirm that your published rules require `auth !== null` before any device goes into active caregiving service.
+</Warning>
+
+## Shared Biological State: The JSON Schema
+
+The entire LifeSphere state lives under a single root key. Every subsystem owns its own branch; no subsystem writes to another subsystem's branch except through explicitly designed cross-writes (e.g., SphereAI writing inferred emotional state after reading Vital32 data).
+
+```json
+{
+  "lifesphere": {
+    "vital32": {
+      "heart_rate":     72,
+      "spo2":           98.2,
+      "skin_temp":      36.4,
+      "hrv_rmssd":      42.1,
+      "hrv_lf_hf":      1.8,
+      "gsr":            0.34,
+      "bio_age":        68.4,
+      "anomaly_score":  0.12,
+      "seizure_prob":   0.03,
+      "cortisol_est":   14.2,
+      "fall_detected":  false,
+      "immune_alert":   false,
+      "timestamp":      1720000000000
+    },
+    "sphereai": {
+      "emotional_state":  "calm",
+      "stress_level":     0.21,
+      "loneliness_index": 0.15,
+      "cognitive_score":  0.94
+    },
+    "hollowrover": {
+      "status":  "idle",
+      "battery": 87
+    },
+    "hollowcore": {
+      "ac_temp": 24,
+      "fan":     false
+    },
+    "entryguard": {
+      "mode":              "passive",
+      "intruder_detected": false
+    }
+  }
+}
+```
+
+### Schema Field Reference
+
+| Field | Branch | Type | Description |
+|---|---|---|---|
+| `heart_rate` | `vital32` | `float` | Beats per minute from MAX30102 PPG sensor |
+| `spo2` | `vital32` | `float` | Blood oxygen saturation, percentage |
+| `skin_temp` | `vital32` | `float` | Peripheral skin temperature, °C |
+| `hrv_rmssd` | `vital32` | `float` | Root mean square of successive RR interval differences, ms |
+| `hrv_lf_hf` | `vital32` | `float` | Sympathovagal balance ratio; >2.0 flags autonomic stress |
+| `gsr` | `vital32` | `float` | Galvanic skin response, μS — proxy for acute stress arousal |
+| `bio_age` | `vital32` | `float` | ML-estimated biological age from HRV and bioimpedance composite |
+| `anomaly_score` | `vital32` | `float` | Isolation Forest score; >0.9 triggers emergency protocol |
+| `seizure_prob` | `vital32` | `float` | LSTM-derived seizure probability; >0.85 dispatches seizure protocol |
+| `cortisol_est` | `vital32` | `float` | HRV-derived cortisol proxy estimate, ng/dL |
+| `fall_detected` | `vital32` | `bool` | True when tri-axis accelerometry confirms a fall event |
+| `immune_alert` | `vital32` | `bool` | True when bioimpedance + HRV composite flags immune suppression |
+| `timestamp` | `vital32` | `int` | Unix epoch milliseconds of the most recent sensor write |
+| `emotional_state` | `sphereai` | `string` | Categorical output of the emotional classifier: `calm`, `anxious`, `distressed`, `isolated` |
+| `stress_level` | `sphereai` | `float` | Continuous stress score [0.0–1.0] from tri-agent fusion |
+| `loneliness_index` | `sphereai` | `float` | Social isolation proxy score [0.0–1.0] |
+| `cognitive_score` | `sphereai` | `float` | Coherence score from voice and interaction pattern analysis [0.0–1.0] |
+
+## ESP32 Firebase Write Implementation
+
+The Vital32 wearable writes sensor data to Firebase using the `FirebaseESP32` library, which abstracts the REST API into typed setter calls. Each sensor value is written to its canonical path in the shared state tree.
+
+```cpp
+#include <FirebaseESP32.h>
+#include <WiFi.h>
+
+#define FIREBASE_HOST "your-project.firebaseio.com"
+#define FIREBASE_AUTH "your-database-secret"
+
+FirebaseData fbdo;
+
+void writeToFirebase(SensorData data) {
+  Firebase.setFloat(fbdo, "/lifesphere/vital32/heart_rate", data.hr);
+  Firebase.setFloat(fbdo, "/lifesphere/vital32/spo2",       data.spo2);
+  Firebase.setBool(fbdo,  "/lifesphere/vital32/fall_detected", data.fall);
+}
+```
+
+Replace `FIREBASE_HOST` with your project's `.firebaseio.com` subdomain and `FIREBASE_AUTH` with the database secret from **Project Settings → Service Accounts → Database secrets**. In production, provision these via ESP32 NVS (Non-Volatile Storage) rather than as preprocessor constants.
+
+## Python Real-Time Listener
+
+The Python backend — running on the HollowRover's RDK X5 or a cloud function — attaches a real-time listener to the `/lifesphere/vital32` branch. The Firebase Admin SDK delivers change events within the 150ms target latency, enabling the system to dispatch emergency protocols within the same breath the sensor detects an anomaly.
+
+```python
+from firebase_admin import credentials, db
+
+cred = credentials.Certificate('serviceAccountKey.json')
+firebase_admin.initialize_app(cred, {
+    'databaseURL': 'https://your-project.firebaseio.com'
+})
+
+ref = db.reference('/lifesphere/vital32')
+
+def on_vital32_change(event):
+    data = event.data
+    if data.get('fall_detected'):
+        dispatch_fall_protocol()
+    if data.get('anomaly_score', 0) > 0.9:
+        dispatch_emergency_protocol()
+    if data.get('seizure_prob', 0) > 0.85:
+        dispatch_seizure_protocol()
+
+ref.listen(on_vital32_change)
+```
+
+The listener fires on any change to the `vital32` subtree. Protocol dispatch functions are non-blocking — they enqueue tasks to the HollowRover navigation controller, the guardian SMS gateway, and the SphereAI triage agent in parallel.
+
+## Latency Characteristics
+
+The 150ms cloud-mediated latency target is achievable under normal residential Wi-Fi conditions when your Firebase project is hosted in the region geographically nearest to your deployment. For the asia-southeast1 region this represents a realistic round-trip budget for:
+
+- ESP32 TLS handshake and write (~40–60ms)
+- Firebase propagation to all active listeners (~20–40ms)
+- Python SDK event callback delivery (~20–40ms)
+- Protocol dispatch initiation (~10–20ms)
+
+Under degraded Wi-Fi conditions, HollowRover activates a local GSM SIM800L fallback. See the [Communication Protocol](/backend/communication-protocol) page for the full fallback architecture.
+
+## Fault Tolerance and Offline Resilience
+
+**Local SD card buffer.** HollowRover stores the last 24 hours of vital data on its onboard SD card. If connectivity is lost, Vital32 writes continue to the local buffer and are replayed to Firebase on reconnection. No data window is lost even during extended outages.
+
+**GSM SIM800L fallback.** During Wi-Fi outages, HollowRover activates as a local Wi-Fi hotspot, allowing Vital32 to continue transmitting over the rover's connection. Simultaneously, the SIM800L module establishes a cellular data channel that provides SMS-based emergency notification and reduced-bandwidth Firebase writes for critical fields (`fall_detected`, `seizure_prob`, `anomaly_score`).
+
+## Security Architecture
+
+| Layer | Mechanism |
+|---|---|
+| Transport | TLS 1.2+ encryption on all Firebase TCP connections |
+| Authentication | Firebase auth token required for all database reads and writes |
+| Service account scope | Service account JSON scoped to LifeSphere project only; no cross-project permissions |
+| Secret management | `serviceAccountKey.json` injected at runtime via environment variable; never committed to source control |
+| Database rules | `auth !== null` on root — no public read or write paths |

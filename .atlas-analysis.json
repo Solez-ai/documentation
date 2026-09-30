@@ -1,0 +1,128 @@
+{
+  "projectType": "ai-ml",
+  "projectName": "LifeSphere",
+  "projectDescription": "LifeSphere is an AI-powered autonomous caregiving ecosystem that unifies continuous biometric monitoring, physical robotic response, emotional intelligence, perimeter security, and biology-responsive home automation into a single synchronized platform—requiring no interaction from the user.",
+  "theme": "willow",
+  "primaryColor": "#2e3f7c",
+  "lightColor": "#4fa1ab",
+  "darkColor": "#5a6a9a",
+  "navigation": {
+    "tabs": [
+      {
+        "tab": "Documentation",
+        "groups": [
+          {
+            "group": "Overview",
+            "pages": [
+              "introduction",
+              "system-architecture",
+              "quickstart"
+            ]
+          },
+          {
+            "group": "Vital32",
+            "pages": [
+              "vital32/overview",
+              "vital32/hardware",
+              "vital32/firmware",
+              "vital32/fall-detection",
+              "vital32/hrv-and-signals"
+            ]
+          },
+          {
+            "group": "HollowRover",
+            "pages": [
+              "hollowrover/overview",
+              "hollowrover/hardware",
+              "hollowrover/navigation",
+              "hollowrover/robotic-arm",
+              "hollowrover/medication-dispenser"
+            ]
+          },
+          {
+            "group": "SphereAI",
+            "pages": [
+              "sphereai/overview",
+              "sphereai/triagent-fusion",
+              "sphereai/voice-hardware"
+            ]
+          },
+          {
+            "group": "EntryGuard & HollowCore",
+            "pages": [
+              "entryguard/overview",
+              "hollowcore/overview",
+              "hollowcore/biometric-automation",
+              "hollowcore/financial-security"
+            ]
+          }
+        ]
+      },
+      {
+        "tab": "AI & Mathematics",
+        "groups": [
+          {
+            "group": "AI Models",
+            "pages": [
+              "ai/pipeline-overview",
+              "ai/isolation-forest",
+              "ai/seizure-lstm",
+              "ai/emotional-classifier",
+              "ai/model-performance"
+            ]
+          },
+          {
+            "group": "Mathematical Foundations",
+            "pages": [
+              "math/biometric-signal-processing",
+              "math/uwb-trilateration",
+              "math/barometric-floor-detection",
+              "math/medication-adherence-entropy"
+            ]
+          },
+          {
+            "group": "Backend & Integration",
+            "pages": [
+              "backend/firebase-architecture",
+              "backend/prescription-ocr",
+              "backend/communication-protocol"
+            ]
+          }
+        ]
+      }
+    ]
+  },
+  "keyFeatures": [
+    "14-sensor Vital32 wearable with real-time ECG, SpO2, HRV, GSR, BIA, and fall detection",
+    "Immune activation prediction 24–48 hours before symptom onset",
+    "Pre-seizure probability estimation up to 30 minutes before onset",
+    "HollowRover autonomous mobile robot with ROS2, SLAM, and 3-anchor UWB precision localization",
+    "Multi-floor deployment via barometric pressure floor discrimination",
+    "6-DOF robotic arm for caregiving assistance and passive security barrier",
+    "Autonomous medication dispensing with prescription OCR onboarding",
+    "SphereAI trimodal emotional intelligence fusing NLP, vocal prosody, and live biomarkers",
+    "EntryGuard perimeter security with facial recognition and multi-sensor threat detection",
+    "HollowCore biology-responsive home automation mapping physiology to environment",
+    "Financial anomaly detection with biometric multi-factor transaction authorization",
+    "Firebase real-time biological state backbone synchronizing all five subsystems at ≤150 ms latency",
+    "Fault-tolerant architecture with local SD fallback, GSM backup, and watchdog timers",
+    "Islamic cultural integration: salah reminders, adhkar, and Ramadan medication protocol"
+  ],
+  "publicApiSurface": [
+    "Firebase Realtime Database path: /lifesphere/vital32 — biometric state object",
+    "Firebase Realtime Database path: /lifesphere/sphereai — emotional state object",
+    "Firebase Realtime Database path: /lifesphere/hollowrover — rover status object",
+    "Firebase Realtime Database path: /lifesphere/hollowcore — environment state object",
+    "Firebase Realtime Database path: /lifesphere/entryguard — security state object",
+    "Firebase path: /lifesphere/hollowcore/med_schedule — medication schedule",
+    "Firebase path: /lifesphere/hollowcore/dispenser_manual — manual dispenser input",
+    "MQTT topic: lifesphere/hollowcore/command — appliance relay commands",
+    "MQTT topic: sphereai/command — SphereAI audio commands",
+    "ESP32 Firebase write: vital32 biometric fields (heart_rate, spo2, fall_detected, anomaly_score, seizure_prob)",
+    "Python Firebase listener: on_vital32_change — triggers fall/emergency/seizure protocols",
+    "Prescription OCR pipeline: extract_prescription(image_path) → structured medication JSON",
+    "SphereAI MetaClassifier.fuse(lang_out, voice_out, bio_out, prior_state) → emotional state",
+    "HollowRover trilaterate_3anchor(a, b, c, rA, rB, rC) → (x, y) position",
+    "Isolation Forest: get_anomaly_score(model, sample) → normalized score 0–1"
+  ]
+}

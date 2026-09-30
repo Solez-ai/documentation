@@ -1,0 +1,200 @@
+---
+title: 'Barometric Floor Detection for Multi-Floor Navigation'
+sidebarTitle: 'Floor Detection'
+description: 'Hydrostatic pressure equations, BME688 floor discrimination, temperature compensation, and EntryGuard integration for multi-floor HollowRover navigation.'
+---
+
+
+# Barometric Floor Detection for Multi-Floor Navigation
+
+HollowRover navigates multi-floor residential and care facilities by combining barometric pressure sensing with UWB trilateration. The BME688 environmental sensor mounted on HollowRover — and replicated at each EntryGuard node — provides the vertical (floor) context, while UWB provides horizontal (XY) precision within the identified floor. This page derives the pressure–altitude relationship, explains the floor discrimination algorithm, and details the registration and compensation procedures.
+
+---
+
+## Hydrostatic Pressure and Altitude
+
+Atmospheric pressure decreases monotonically with altitude according to the **hydrostatic equation**:
+
+$$\frac{dP}{dz} = -\rho g$$
+
+At standard sea-level conditions ($T_0 = 288.15\,\text{K}$, $P_0 = 101\,325\,\text{Pa}$, $\rho_0 = 1.225\,\text{kg/m}^3$):
+
+$$\frac{dP}{dz} \approx -\rho g \approx -1.225 \times 9.81 \approx -12.0\,\text{Pa/m}$$
+
+For a typical residential floor height of $h_{floor} = 3.0\,\text{m}$, the expected pressure difference between adjacent floors is:
+
+$$\Delta P_{floor} = \left|\frac{dP}{dz}\right| \times h_{floor} \approx 12.0 \times 3.0 = 36\,\text{Pa}$$
+
+The BME688 barometric sensor has a pressure resolution of $0.18\,\text{Pa}$ and a root-sum-square noise of approximately $\pm 1.3\,\text{Pa}$ at 4× oversampling. This gives a floor discrimination SNR of:
+
+$$\text{SNR}_{floor} = \frac{\Delta P_{floor}}{\sigma_P} = \frac{36}{1.3} \approx 27.7 \implies > 14\,\text{dB margin}$$
+
+---
+
+## Floor Discrimination Formula
+
+Given a calibrated reference pressure $P_0$ (measured at the designated ground-floor reference point) and the measured pressure difference per floor $\Delta P_{floor}$ (obtained during registration), you estimate the continuous floor index as:
+
+$$z_{floor} = \frac{P_0 - P_{measured}}{\Delta P_{floor}}$$
+
+The sign convention is positive-upward: if $P_{measured} < P_0$, the rover is above the reference floor, giving $z_{floor} > 0$.
+
+**Discrete floor assignment** selects the nearest registered floor:
+
+$$f^* = \arg\min_{f \in \mathcal{F}} \left| P_{measured} - P_f \right|$$
+
+where $\mathcal{F} = \{P_{f_1}, P_{f_2}, \ldots, P_{f_n}\}$ is the set of registered floor pressures. This is a nearest-neighbor lookup in pressure space, equivalent to argmin $|z_{floor} - f|$ when floors are uniformly spaced.
+
+<Note>
+In most residential buildings $\Delta P_{floor}$ is not perfectly uniform — floor heights vary, and upper floors may have lower ceilings. The registration procedure below measures $P_f$ directly for each floor, so non-uniform spacing is handled automatically without relying on the linear model above.
+</Note>
+
+---
+
+## Floor Registration Procedure
+
+You must complete floor registration once per building deployment. The procedure stores a pressure fingerprint for each floor.
+
+<Steps>
+  <Step title="Position HollowRover on Ground Floor">
+    Place the rover at a stable position on the ground floor (floor 0). Ensure the HVAC system is in its normal operating state — do not register during active pressurization events.
+  </Step>
+  <Step title="Record 60-Second Pressure Window">
+    Collect 60 seconds of BME688 pressure readings at 10 Hz (600 samples). Compute the mean and standard deviation:
+
+    $$P_{f_0} = \frac{1}{600}\sum_{k=1}^{600} P_k, \qquad \sigma_{f_0} = \sqrt{\frac{1}{599}\sum_{k=1}^{600}(P_k - P_{f_0})^2}$$
+
+    If $\sigma_{f_0} > 2.0\,\text{Pa}$, the environment is too turbulent for reliable registration — wait for HVAC stabilization and retry.
+  </Step>
+  <Step title="Record Each Additional Floor">
+    Repeat step 2 for each floor. The rover is manually carried between floors during registration. The firmware automatically labels each session with `floor_id` (0-indexed from ground).
+  </Step>
+  <Step title="Verify Inter-Floor Separation">
+    After recording all floors, verify that adjacent floors have sufficient pressure separation:
+
+    $$|P_{f_{k+1}} - P_{f_k}| > 3\sigma_{max} \approx 4\,\text{Pa} \quad \text{(3-sigma separation criterion)}$$
+
+    If any adjacent pair falls below this threshold, the registration rejects with `FLOOR_PRESSURE_OVERLAP`.
+  </Step>
+  <Step title="Store Configuration">
+    Write the registered data to the SLAM map configuration file:
+
+    ```json
+    {
+      "floor_registry": [
+        {
+          "floor_id": 0,
+          "mean_pressure_pa": 101250.4,
+          "std_pressure_pa": 0.9,
+          "uwb_anchor_geometry": {
+            "A": [1.2, 0.8],
+            "B": [8.1, 0.8],
+            "C": [4.6, 6.4]
+          },
+          "slam_map_file": "floor0_map.pgm"
+        },
+        {
+          "floor_id": 1,
+          "mean_pressure_pa": 101214.2,
+          "std_pressure_pa": 1.1,
+          "uwb_anchor_geometry": {
+            "A": [1.2, 0.8],
+            "B": [8.1, 0.8],
+            "C": [4.6, 6.4]
+          },
+          "slam_map_file": "floor1_map.pgm"
+        }
+      ]
+    }
+    ```
+  </Step>
+</Steps>
+
+---
+
+## Temperature Compensation
+
+The hydrostatic pressure gradient $dP/dz = -\rho g$ depends on air density $\rho$, which in turn depends on temperature via the ideal gas law $\rho = PM/(RT)$. The BME688 simultaneously measures pressure and temperature, enabling first-order compensation:
+
+$$P_c = P_{raw} \times f(T) = P_{raw} \times \frac{T_0}{T_{measured}}$$
+
+where $T_0 = 288.15\,\text{K}$ is the standard reference temperature and $T_{measured}$ is the current air temperature in Kelvin. This correction adjusts for air density variations due to seasonal temperature changes or HVAC heating/cooling:
+
+$$f(T) = \frac{288.15}{T_{measured}}$$
+
+**Magnitude of the correction:** A $\pm 20\,°\text{C}$ deviation from standard temperature ($T_{measured} = 308\,\text{K}$ vs. $268\,\text{K}$) changes the effective pressure gradient by $\pm 6.5\%$, which translates to a floor-discrimination error of $\pm 2.3\,\text{Pa}$ — well within the 36 Pa inter-floor separation. Nevertheless, applying $f(T)$ reduces systematic offset accumulation across multi-floor buildings.
+
+<AccordionGroup>
+  <Accordion title="BME688 Onboard Compensation Algorithm">
+
+The BME688 integrates a Bosch-proprietary compensation algorithm (BSEC) that applies a polynomial correction to the raw ADC counts for both pressure and temperature. The compensated output satisfies:
+
+$$P_{comp} = \frac{P_{ADC}}{t_fine^2} \cdot \left(c_{P1} + \frac{c_{P2}}{t_{fine}} + c_{P3} \cdot t_{fine}\right) + \left(c_{P4} + c_{P5} \cdot t_{fine}\right) + \frac{c_{P6} + c_{P7} \cdot t_{fine}}{P_{ADC}}$$
+
+where $t_{fine}$ is a temperature-fine-correction variable derived from the onboard temperature compensation chain, and $\{c_{Pi}\}$ are factory-trimmed coefficients stored in the sensor's NVM. You access $P_{comp}$ directly through the BME680/688 driver — you do not need to implement the polynomial chain manually.
+
+The net absolute accuracy after BSEC compensation is $\pm 1.0\,\text{hPa}$ ($\pm 100\,\text{Pa}$) over the full temperature range — but for **differential** floor detection you rely only on the short-term relative noise of $\pm 1.3\,\text{Pa}$, which is two orders of magnitude better.
+
+  </Accordion>
+  <Accordion title="HVAC Pressure Interference and Mitigation">
+
+Building HVAC systems can create inter-floor pressure differentials of 1–10 Pa due to duct pressure imbalance, exhaust fan operation, and door/window states. These are the dominant noise source in floor detection after sensor noise.
+
+**Mitigation strategies:**
+
+1. **Moving-average filter:** Apply a 3-second rolling mean to $P_{measured}$ before floor lookup. HVAC fluctuations typically have periods of $> 30\,\text{s}$, so the 3-second window suppresses turbulence without smearing floor transitions.
+2. **Hysteresis band:** Only trigger a floor change event if the pressure remains in the new floor's region for $> 5\,\text{s}$ continuously. This prevents false floor transitions from momentary pressure spikes during door opening events.
+3. **Cross-validation with IMU:** A floor transition must be corroborated by a $> 0.5\,\text{m}$ vertical displacement in the rover's IMU dead-reckoning estimate. If the barometric evidence and IMU evidence disagree, the system holds the current floor assignment and logs a `FLOOR_DETECTION_AMBIGUOUS` event.
+
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## EntryGuard Integration
+
+Each EntryGuard door node is equipped with its own BME688 sensor. When an EntryGuard alert fires (visitor detection, door-open event, or fall detection near an entry point), the alert payload includes the node's current pressure reading alongside its UWB zone ID:
+
+```json
+{
+  "node_id": "entryguard_front_door",
+  "event_type": "DOOR_OPEN",
+  "timestamp_unix_ms": 1718200400234,
+  "bme688_pressure_pa": 101214.7,
+  "uwb_zone_id": "zone_hallway_floor1"
+}
+```
+
+HollowRover's routing engine performs the following decision sequence upon receiving this payload:
+
+1. Match `bme688_pressure_pa` against the registered floor table → identify target floor $f^*$.
+2. If rover is not already on floor $f^*$, navigate to the stairwell/lift waypoint and perform floor transition.
+3. On arrival at $f^*$, load the corresponding SLAM map and UWB anchor set.
+4. Navigate to the `uwb_zone_id` centroid using the UWB trilateration system.
+
+This cross-referencing of barometric pressure between the rover and the stationary EntryGuard node provides a **differential measurement** that is immune to building-wide absolute pressure changes (e.g., weather fronts), since both sensors drift identically:
+
+$$\Delta P_{differential} = P_{EntryGuard} - P_{rover}$$
+
+$$f_{target} = \arg\min_f |P_f - P_{EntryGuard}|, \qquad f_{rover} = \arg\min_f |P_f - P_{rover}|$$
+
+If $f_{target} \neq f_{rover}$, a floor transition is scheduled.
+
+<Note>
+Re-calibrate floor baselines if your building's HVAC system creates persistent inter-floor pressure differences greater than 5 Pa in steady state. This can occur in high-rise buildings with strong stack-effect ventilation or in buildings where floors are pressurized to different setpoints for infection control. Re-registration takes approximately 5 minutes per floor and should be performed at the HVAC's typical operating setpoint (e.g., daytime mode), not during night setback.
+</Note>
+
+---
+
+## Coordinate System Summary
+
+The full 3D localization pipeline decouples cleanly along the vertical and horizontal axes:
+
+| Axis | Sensor | Method | Accuracy |
+|---|---|---|---|
+| $z$ (floor) | BME688 | Nearest-neighbor pressure lookup | Single-floor — 36 Pa separation vs. ±1.3 Pa noise |
+| $x, y$ (position) | DWM1000 UWB | 3-anchor trilateration — $\mathbf{x} = A^{-1}\mathbf{b}$ | $\pm 10\,\text{cm}$ (1$\sigma$) |
+
+<Tip>
+If you are deploying in a single-floor environment, you can disable the barometric floor selector entirely and hard-code `floor_id = 0`. The UWB trilateration system operates identically regardless of the floor discrimination state.
+</Tip>

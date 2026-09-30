@@ -1,0 +1,210 @@
+---
+title: 'Biometric Signal Processing: HRV, GSR, and Cortisol Estimation'
+sidebarTitle: 'Signal Processing'
+description: 'Derivations for HRV, RMSSD, LF/HF spectral ratio, GSR electrodermal activity, bioelectrical impedance, and cortisol proxy estimation on Vital32.'
+---
+
+
+# Biometric Signal Processing: HRV, GSR, and Cortisol Estimation
+
+Vital32 acquires four primary biometric streams in continuous operation: photoplethysmography (PPG) from the MAX30102, galvanic skin response (GSR) from a two-electrode circuit on GPIO35, bioelectrical impedance from the AD5933 network analyzer, and skin surface temperature from the MLX90614 IR thermometer. You pass all four streams through a rigorous signal validation and feature-extraction pipeline before they enter any inference model. This page derives the core mathematical transforms applied to each stream.
+
+---
+
+## Heart Rate Variability from PPG Waveform
+
+The MAX30102 samples at 100 Hz in its default Red + IR configuration. You extract the RR interval time series $\{RR_i\}$ from successive systolic peaks in the IR channel. Each $RR_i$ is the elapsed time in milliseconds between beat $i$ and beat $i+1$.
+
+$$RR_i = t_{i+1} - t_i \quad [\text{ms}]$$
+
+Before computing any HRV metric you apply the following pre-processing chain:
+
+1. **Band-pass filter**: 4th-order Butterworth, 0.5–8 Hz — removes motion artifact and baseline drift.
+2. **Ectopic beat removal**: replace any $RR_i > 1.5 \times \text{median}(\{RR\})$ or $RR_i < 0.5 \times \text{median}(\{RR\})$ with a cubic-spline interpolated value from the neighboring valid beats.
+3. **Resampling**: interpolate the irregularly-spaced RR series onto a uniform 4 Hz grid using shape-preserving piecewise cubic interpolation — required for Fourier analysis.
+
+<AccordionGroup>
+  <Accordion title="RMSSD — Root Mean Square of Successive Differences">
+
+### Derivation
+
+RMSSD is the square root of the mean squared first difference of the RR series:
+
+$$\text{RMSSD} = \sqrt{\frac{1}{N-1} \sum_{i=1}^{N-1} (RR_{i+1} - RR_i)^2}$$
+
+The differencing operator $(RR_{i+1} - RR_i)$ acts as a high-pass filter on the RR sequence — it attenuates power below roughly $1/\bar{RR}$ Hz. Because low-frequency oscillations (thermoregulation, RAAS activity, Mayer waves) have periods much longer than one beat, they cancel in the difference, leaving only the beat-to-beat autonomic modulation that resides in the high-frequency (HF) band.
+
+**Physiological interpretation:**
+
+| RMSSD value | Autonomic state |
+|---|---|
+| $> 50\,\text{ms}$ | Strong parasympathetic (vagal) tone — rest, recovery |
+| $20–50\,\text{ms}$ | Balanced ANS — normal waking activity |
+| $< 20\,\text{ms}$ | Sympathetic dominance — acute stress, exertion, illness |
+
+An increasing RMSSD trend over a 15-minute window signals parasympathetic dominance (recovery). A sustained decrease below $20\,\text{ms}$ triggers the `HRV_STRESS` feature flag, which feeds the Isolation Forest anomaly scorer.
+
+  </Accordion>
+
+  <Accordion title="LF/HF Spectral Ratio — Power Spectral Density Analysis">
+
+### Welch Power Spectral Density
+
+You compute the PSD of the uniformly-resampled RR series using Welch's method with a 256-point Hann window and 50% overlap. The result $P(f)$ carries units of $\text{ms}^2/\text{Hz}$.
+
+The LF and HF band powers are computed by numerical integration (trapezoidal rule) over their respective frequency bands:
+
+$$\text{LF} = \int_{0.04}^{0.15} P(f)\,df \qquad \text{HF} = \int_{0.15}^{0.40} P(f)\,df$$
+
+The autonomic balance ratio is then:
+
+$$\frac{LF}{HF} = \frac{\int_{0.04}^{0.15} P(f)\,df}{\int_{0.15}^{0.40} P(f)\,df}$$
+
+**Band physiology:**
+
+- **LF band (0.04–0.15 Hz):** Mayer waves, baroreflex activity, mixed sympathetic + parasympathetic contributions. Dominant oscillation period: 7–25 s.
+- **HF band (0.15–0.40 Hz):** Respiratory sinus arrhythmia — almost exclusively vagal. Dominant period corresponds to one respiratory cycle (2.5–7 s).
+
+**Interpretation:**
+
+$$\frac{LF}{HF} > 2.0 \implies \text{sympathetic dominance (stress, pain, anxiety)}$$
+
+$$\frac{LF}{HF} < 0.5 \implies \text{parasympathetic dominance (deep sleep, relaxation)}$$
+
+The ratio is computed over a rolling 5-minute window to satisfy Nyquist requirements for the 0.04 Hz lower bound.
+
+  </Accordion>
+
+  <Accordion title="Cortisol Proxy Estimation — Multivariate Model">
+
+### Cortisol Estimation Function
+
+True serum cortisol measurement requires laboratory assay. Vital32 instead computes a dimensionless **cortisol proxy index** $C_{est} \in [0, 1]$ using four physiologically-grounded features:
+
+$$C_{est} = f(\text{RMSSD},\; G_{baseline},\; T_{skin},\; \eta_{sleep})$$
+
+Expanding with the trained linear regression coefficients:
+
+$$C_{est} = \sigma\!\left(\beta_0 + \beta_1 \cdot \frac{1}{\text{RMSSD}} + \beta_2 \cdot G_{baseline} + \beta_3 \cdot (T_{ref} - T_{skin}) + \beta_4 \cdot (1 - \eta_{sleep})\right)$$
+
+where $\sigma(\cdot)$ is the logistic sigmoid and the coefficients $\{\beta_i\}$ are calibrated against literature-reported diurnal cortisol profiles.
+
+**Variable roles:**
+
+| Variable | Physical meaning | Cortisol coupling |
+|---|---|---|
+| $\text{RMSSD}^{-1}$ | HPA axis activity proxy | High cortisol suppresses vagal tone → RMSSD falls |
+| $G_{baseline}$ | Sympathetic nervous system activity via electrodermal | Cortisol potentiates sympathetic arousal → $G$ rises |
+| $T_{ref} - T_{skin}$ | Peripheral vasoconstriction indicator | Cortisol-driven vasoconstriction → skin cools |
+| $1 - \eta_{sleep}$ | Sleep efficiency deficit | Poor sleep elevates evening cortisol; term is largest when $\eta_{sleep} \to 0$ |
+
+Sleep efficiency $\eta_{sleep}$ is computed from the previous night's IMU and HRV data: $\eta_{sleep} = T_{sleep} / T_{bed} \in [0, 1]$.
+
+$C_{est} > 0.7$ activates the `CORTISOL_HIGH` feature and contributes to the autonomic anomaly score fed into the SphereAI triage pipeline.
+
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Galvanic Skin Response (GSR)
+
+The GSR circuit applies a constant 0.5 V excitation across two stainless-steel electrodes bonded to the inner wrist. The ADC on GPIO35 samples the resulting current at 50 Hz. Skin conductance is derived directly from Ohm's law:
+
+$$G = \frac{1}{R} = \frac{I}{V} = \frac{V_{ADC}}{V_{excitation} \cdot R_{sense}} \quad [\mu\text{S}]$$
+
+Electrodermal activity has two components:
+
+- **Skin conductance level (SCL):** Tonic baseline; shifts over tens of seconds. Elevated SCL correlates with sustained sympathetic arousal and is a proxy for circulating catecholamines.
+- **Skin conductance responses (SCR):** Phasic peaks superimposed on SCL; individual stress events produce SCR rise-times of 1–3 s and recovery times of 5–20 s.
+
+You detect SCR events with a first-derivative threshold:
+
+$$\frac{dG}{dt} > \theta_{SCR} = 0.05\,\mu\text{S/s}$$
+
+An SCR count exceeding 10 events in a 5-minute window contributes a positive unit to the autonomic stress composite score.
+
+<Accordion title="GSR Electrode Circuit and Signal Path">
+
+The circuit consists of a precision voltage divider: $V_{excitation} = 0.5\,\text{V}$ (from ESP32 DAC, low-pass filtered to remove PWM ripple) → sense resistor $R_s = 100\,\text{k}\Omega$ → electrode pair → GND. The ADC reads the voltage at the junction between $R_s$ and the electrode:
+
+$$V_{ADC} = V_{excitation} \cdot \frac{R_{skin}}{R_s + R_{skin}}$$
+
+Solving for $R_{skin}$ and inverting:
+
+$$G = \frac{1}{R_{skin}} = \frac{V_{excitation} - V_{ADC}}{V_{ADC} \cdot R_s}$$
+
+The 12-bit ADC resolution at 3.3 V full scale gives $\Delta V_{ADC} \approx 0.8\,\text{mV}$, corresponding to a conductance resolution of approximately $0.01\,\mu\text{S}$ at typical baseline conductance of $5\,\mu\text{S}$ — sufficient to resolve individual SCR events.
+
+</Accordion>
+
+---
+
+## Bioelectrical Impedance Analysis (AD5933)
+
+The AD5933 programmable impedance analyzer drives an AC excitation at 50 kHz and measures the complex impedance across the tissue path. Tissue impedance is modeled as:
+
+$$Z = R_{tissue} + j X_{tissue}$$
+
+where:
+
+- $R_{tissue}$ — resistive component: inversely proportional to ionic (electrolyte) content of extracellular fluid.
+- $X_{tissue} = -1/(2\pi f C_{membrane})$ — reactive component: capacitive reactance of cell membranes. At 50 kHz, current penetrates cell membranes appreciably, providing sensitivity to intracellular fluid.
+
+**Hydration index:**
+
+$$\Phi_{hydration} = \frac{X_{tissue}}{R_{tissue}} = \tan(\phi_Z)$$
+
+A well-hydrated subject exhibits $|\phi_Z| \approx 7–10°$ at 50 kHz. Dehydration causes $R_{tissue}$ to rise (reduced electrolyte concentration) and $|X_{tissue}|$ to fall (cell shrinkage reduces membrane capacitance), producing $|\phi_Z| < 5°$.
+
+<AccordionGroup>
+  <Accordion title="AD5933 Calibration Procedure">
+
+Before each measurement session you perform a two-point calibration using precision resistors:
+
+1. Connect known resistor $R_{cal1} = 1\,\text{k}\Omega$ — sets the gain factor $G_f = |Z_{measured}|/|Z_{actual}|$.
+2. Connect known resistor $R_{cal2} = 10\,\text{k}\Omega$ — verifies linearity.
+3. Store $G_f$ in firmware; all subsequent impedance readings are divided by $G_f$ to yield calibrated $|Z|$.
+
+The phase angle is computed from the real and imaginary DFT output registers $R_e$ and $I_m$:
+
+$$\phi_Z = \arctan\!\left(\frac{I_m}{R_e}\right) - \phi_{system}$$
+
+where $\phi_{system}$ is the system phase offset measured during calibration with a known RC network.
+
+  </Accordion>
+  <Accordion title="Tissue Model: Cole-Cole Equivalent Circuit">
+
+The full Cole-Cole model of biological tissue replaces the simple $R + jX$ representation with a parallel combination:
+
+$$Z_{Cole}(\omega) = R_\infty + \frac{R_0 - R_\infty}{1 + (j\omega\tau)^\alpha}$$
+
+where $R_0$ is the impedance at DC ($\omega \to 0$), $R_\infty$ is the impedance at infinite frequency, $\tau$ is the characteristic time constant of the relaxation dispersion, and $\alpha \in (0,1]$ is the distribution parameter (1 = ideal Debye relaxation).
+
+At the single operating frequency of 50 kHz, you approximate the Cole-Cole model with the simpler two-component model above, accepting the approximation error of $< 3\%$ in $\phi_Z$ for the typical tissue parameters of an adult subject.
+
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Signal Validation — Physical Plausibility Bounds
+
+All sensor readings pass through a validation gate before entering any inference pipeline. The gate rejects samples outside physically plausible ranges:
+
+| Signal | Valid range | Rejection action |
+|---|---|---|
+| Heart rate $f_{HR}$ | $[30, 220]\,\text{bpm}$ | Flag `SENSOR_INVALID`; last valid value held for up to 5 s |
+| SpO$_2$ | $[70, 100]\,\%$ | Flag `SPO2_INVALID`; trigger re-measurement |
+| RR interval | $[273, 2000]\,\text{ms}$ | Ectopic beat — cubic-spline interpolated |
+| Skin conductance $G$ | $[0.5, 100]\,\mu\text{S}$ | Electrode contact check triggered |
+| Impedance phase $\phi_Z$ | $[-30°, 0°]$ | Re-calibration scheduled |
+| Skin temperature $T_{skin}$ | $[28, 40]\,°\text{C}$ | Reject; ambient temperature compensation applied |
+
+<Warning>
+Any sensor reading flagged `SENSOR_INVALID` for more than **30 seconds continuously** triggers a `BIOMETRIC_LOSS` event in HollowCore. This event escalates to SphereAI, which initiates a verbal check-in with the care recipient and, if unresponsive, alerts the registered caregiver.
+</Warning>
+
+<Note>
+The physical plausibility bounds above are conservative by design. They do not replace clinical interpretation — a SpO₂ of 72% is physically valid and will pass the gate, but will immediately trigger the `SPO2_CRITICAL` anomaly flag in the Isolation Forest scorer.
+</Note>

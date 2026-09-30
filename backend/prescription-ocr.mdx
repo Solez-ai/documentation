@@ -1,0 +1,195 @@
+---
+title: 'Prescription OCR Pipeline: Automated Medication Schedule Setup'
+sidebarTitle: 'Prescription OCR'
+description: "One-time prescription photograph workflow that converts a doctor's handwritten or printed prescription into a complete, confirmed medication schedule via OCR and LLM extraction."
+---
+
+
+## The Problem with Manual Medication Entry
+
+Medication schedules for elderly residents are rarely simple. A post-hospitalisation prescription routinely covers four to eight medications with different dosages, different frequencies, different meal relationships, and different durations. Entering each drug name, dose, timing, and duration manually into a mobile app introduces transcription errors at every field — and the friction of that process discourages adoption before the first dose is ever delivered.
+
+The failure is not technological. It is ergonomic. A caregiver who spends fifteen minutes entering a prescription at 11pm after a hospital discharge is a caregiver who is likely to make a mistake, give up, or skip the system entirely. LifeSphere solves this with a single design constraint: **photograph once, confirm once, the system handles everything else.**
+
+## Two Input Paths
+
+LifeSphere supports two entry points for prescription ingestion, suited to different caregiving contexts.
+
+<Info>
+  Both paths produce an identical Firebase payload at `/lifesphere/hollowcore/med_schedule`. The HollowRover does not distinguish between the source of the schedule — it subscribes to that path and begins autonomous delivery regardless of how the data arrived.
+</Info>
+
+| Path | Interface | Best for |
+|---|---|---|
+| **Mobile App OCR** | Smartphone camera + cloud pipeline | Remote caregiver, good lighting, printed prescription |
+| **Touchscreen Entry** | ILI9488 3.5" TFT on HollowRover | On-site manual entry, backup when app unavailable |
+
+The remainder of this page documents the mobile app OCR path in detail. The ILI9488 touchscreen interface is covered in [HollowRover Medication Dispenser](/hollowrover/medication-dispenser).
+
+## Phone-Side OCR Pipeline
+
+<Steps>
+  <Step title="Photograph the prescription">
+    The caregiver opens the LifeSphere mobile app and selects **Add Prescription**. The camera interface activates with a framing guide overlay. The app captures a still image of the prescription — printed or handwritten — and passes it to the local preprocessing pipeline.
+  </Step>
+
+  <Step title="OpenCV adaptive threshold preprocessing">
+    Raw prescription photographs introduce lighting gradients, shadow from page curl, and inconsistent ink contrast. Standard global thresholding fails on these inputs. LifeSphere applies Gaussian adaptive thresholding, which computes a local threshold for each pixel neighbourhood rather than a single global cutoff — preserving ink strokes across varying illumination zones:
+
+    ```python
+    import cv2
+
+    img  = cv2.imread(image_path)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31, 10
+    )
+    ```
+
+    The block size of `31` captures neighbourhood context across approximately 3–4mm of physical prescription paper at standard smartphone resolution. The constant subtracted from the mean (`10`) prevents thin strokes from dropping below the binarisation threshold.
+  </Step>
+
+  <Step title="Tesseract OCR character extraction">
+    The preprocessed binary image is passed to Tesseract for raw character extraction. At this stage, the output is unstructured text — Tesseract has no semantic model for medical terminology, abbreviation conventions, or prescription layout:
+
+    ```python
+    import pytesseract
+
+    text = pytesseract.image_to_string(gray, lang='eng')
+    ```
+
+    The `lang='eng'` parameter is appropriate for Latin-script prescriptions. For mixed-script environments (Bengali + English, for example), consider a `lang='eng+ben'` configuration and verify Tesseract's trained data for the target script is installed.
+  </Step>
+
+  <Step title="LLM contextual extraction">
+    Raw OCR output from a handwritten prescription is not directly parseable by pattern matching. Abbreviation conventions vary by physician, institution, and country. `1-0-1 pc` means once in the morning and once at night with meals — a structure that requires medical domain context to interpret correctly. A regex cannot generalise across this variability. An LLM can.
+
+    LifeSphere sends the raw OCR text to an LLM with a structured extraction prompt:
+
+    ```python
+    def llm_extract_medications(raw_text):
+        prompt = (
+            f"Extract medicines from this prescription text. "
+            f"Return JSON: [{{name, dosage, frequency, duration}}] "
+            f"Text: {raw_text}"
+        )
+        response = call_llm(prompt)
+        return parse_json(response)
+    ```
+
+    The LLM interprets contextual cues that raw OCR cannot — dosage fractions, meal-relative timing abbreviations, drug name misspellings from OCR noise, and multi-line entries split by page artefacts. The output is a structured JSON array, one object per medication.
+  </Step>
+
+  <Step title="Sync structured schedule to Firebase">
+    The extracted medication array is written to the `med_schedule` path under HollowCore — the environment and schedule coordination branch of the shared state tree:
+
+    ```python
+    import firebase_admin
+    from firebase_admin import credentials, db
+
+    def sync_to_firebase(meds):
+        ref = db.reference('/lifesphere/hollowcore/med_schedule')
+        ref.set(meds)
+    ```
+
+    At this point the schedule is in Firebase but not yet active. HollowRover listens to this path but waits for the caregiver confirmation flag before executing any delivery.
+  </Step>
+
+  <Step title="Caregiver review and confirmation in the app">
+    The app renders the extracted medication list in an editable card interface. Each field — name, dosage, frequency, duration — is individually editable. This review step is mandatory before the schedule activates. It catches OCR errors, LLM misinterpretations, and any prescription changes made verbally between physician and patient that are not reflected in the written document.
+
+    Once the caregiver confirms, the app writes a `confirmed: true` flag to the Firebase schedule node and timestamps the activation.
+  </Step>
+
+  <Step title="HollowRover subscribes and begins autonomous delivery">
+    HollowRover's Python process maintains a Firebase listener on `/lifesphere/hollowcore/med_schedule`. On receiving a confirmed schedule update, it computes the next delivery timestamp for each medication, enqueues delivery tasks into the ROS2 action server, and begins autonomous navigation and dispensing on schedule.
+  </Step>
+</Steps>
+
+<Tip>
+  For highest OCR accuracy, photograph prescriptions on a **flat, dark, non-reflective surface** under **even, diffuse lighting** — avoid direct sunlight, which creates overexposed regions that erase thin ink strokes. If the prescription is multi-page, photograph each page as a separate image and combine the extracted medication arrays before review. Printed prescriptions consistently outperform handwritten ones; when possible, request a printed or typed prescription from the physician.
+</Tip>
+
+## Complete Pipeline Implementation
+
+```python
+from PIL import Image
+from firebase_admin import credentials, db
+
+cred = credentials.Certificate('serviceAccountKey.json')
+firebase_admin.initialize_app(cred, {
+    'databaseURL': 'https://your-project.firebaseio.com'
+})
+
+def extract_prescription(image_path):
+    img  = cv2.imread(image_path)
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+    gray = cv2.adaptiveThreshold(
+        gray, 255,
+        cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY,
+        31, 10
+    )
+    text = pytesseract.image_to_string(gray, lang='eng')
+    meds = llm_extract_medications(text)
+    return meds
+
+def llm_extract_medications(raw_text):
+    prompt = (
+        f"Extract medicines from this prescription text. "
+        f"Return JSON: [{{name, dosage, frequency, duration}}] "
+        f"Text: {raw_text}"
+    )
+    response = call_llm(prompt)
+    return parse_json(response)
+
+def sync_to_firebase(meds):
+    ref = db.reference('/lifesphere/hollowcore/med_schedule')
+    ref.set(meds)
+```
+
+## Why LLM Extraction Rather Than Pattern Matching
+
+Doctor handwriting exhibits variability that defeats deterministic parsers across three independent axes:
+
+**Abbreviation diversity.** `BD`, `b.d.`, `twice daily`, `1-0-1`, `q12h`, and `2x/day` all encode the same dosing frequency. No finite regular expression covers the long tail of physician shorthand conventions in active clinical use.
+
+**OCR noise propagation.** Tesseract on handwritten input produces character substitutions (`0` for `O`, `1` for `l`, `5` for `S`) that corrupt drug names at the character level. An LLM operating on the full text context can identify that `Metf0rmin` is almost certainly `Metformin` — a pattern matcher operating field-by-field cannot.
+
+**Implicit structure.** Prescriptions do not follow a fixed schema. A physician may write a drug name, skip a line, write the dosage beside a different drug on the next line, and group timing instructions in a footnote. An LLM infers the relational structure from semantic context; a layout parser requires a template it cannot generalise across practitioners.
+
+## Firebase med_schedule Schema
+
+Each entry in the schedule array conforms to the following structure:
+
+```json
+[
+  {
+    "name":               "Metformin",
+    "dosage":             "500mg",
+    "frequency":          "twice daily with meals",
+    "duration":           "30 days",
+    "next_dose_timestamp": 1720012800000
+  },
+  {
+    "name":               "Amlodipine",
+    "dosage":             "5mg",
+    "frequency":          "once daily at night",
+    "duration":           "ongoing",
+    "next_dose_timestamp": 1720051200000
+  }
+]
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `name` | `string` | Drug name as extracted and corrected by the LLM |
+| `dosage` | `string` | Dose amount and unit, e.g. `500mg`, `10ml` |
+| `frequency` | `string` | Human-readable frequency string, resolved from abbreviations |
+| `duration` | `string` | Course duration; `"ongoing"` for maintenance medications |
+| `next_dose_timestamp` | `int` | Unix epoch milliseconds of the next scheduled delivery, computed at confirmation time |
+
+HollowRover's delivery scheduler reads `next_dose_timestamp` and sets an ROS2 timer to initiate navigation and dispensing at that exact time. On successful delivery it increments the timestamp by the dosing interval and writes the updated value back to Firebase.

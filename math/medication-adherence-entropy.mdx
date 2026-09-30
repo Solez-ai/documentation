@@ -1,0 +1,244 @@
+---
+title: 'Medication Adherence Entropy and Schedule Optimization'
+sidebarTitle: 'Adherence Entropy'
+description: 'Shannon entropy applied to medication adherence events, alert thresholds, Isolation Forest feature integration, and Firebase schema in LifeSphere.'
+---
+
+
+# Medication Adherence Entropy and Schedule Optimization
+
+LifeSphere quantifies medication adherence not merely as a count of missed doses, but as the **informational irregularity** of the adherence pattern over time. By applying Shannon entropy to the categorical distribution of dose events, you obtain a single scalar that captures both frequency and temporal structure of non-adherence — enabling earlier and more nuanced intervention than a naive miss-count threshold.
+
+---
+
+## Shannon Entropy Applied to Adherence Events
+
+Each dose event $x_i$ is assigned to one of three outcome categories:
+
+| Category | Symbol | Definition |
+|---|---|---|
+| Taken on time | $x_1$ | Dose confirmed within $\pm 30\,\text{min}$ of scheduled time |
+| Taken late | $x_2$ | Dose confirmed $> 30\,\text{min}$ after scheduled time |
+| Missed | $x_3$ | No dose confirmation within the 24-hour window |
+
+Over a rolling 7-day window containing $N$ scheduled dose events, you estimate the empirical probabilities:
+
+$$p_k = \frac{\text{count}(x_k)}{N}, \qquad k \in \{1, 2, 3\}, \qquad p_1 + p_2 + p_3 = 1$$
+
+The Shannon entropy of the adherence distribution is:
+
+$$H(X) = -\sum_{i} p(x_i) \log_2 p(x_i) = -p_1 \log_2 p_1 - p_2 \log_2 p_2 - p_3 \log_2 p_3$$
+
+with the standard convention $0 \log_2 0 = 0$ (a category with zero probability contributes nothing to $H$).
+
+---
+
+## Entropy Bounds and Interpretation
+
+### Lower Bound: Perfect Adherence
+
+When all $N$ doses are taken on time, $p_1 = 1$, $p_2 = p_3 = 0$:
+
+$$H(X) = -1 \cdot \log_2(1) - 0 - 0 = 0 \text{ bits}$$
+
+Zero entropy indicates a **perfectly deterministic** schedule — the next outcome is known with certainty before it occurs. No intervention is required.
+
+### Upper Bound: Maximal Irregularity
+
+For a 3-outcome distribution, entropy is maximized when all outcomes are equally likely, $p_1 = p_2 = p_3 = 1/3$:
+
+$$H_{max} = -3 \times \frac{1}{3}\log_2\!\left(\frac{1}{3}\right) = \log_2(3) \approx 1.585\,\text{bits}$$
+
+Approaching $H_{max}$ means the system cannot predict whether the next dose will be taken on time, late, or missed — a maximally irregular pattern that triggers immediate caregiver escalation.
+
+### Entropy as a Function of $(p_1, p_2, p_3)$
+
+The entropy surface over the 2-simplex $\{p_1 + p_2 + p_3 = 1,\; p_i \geq 0\}$ has the following key properties:
+
+- It is **concave** — adding uncertainty never decreases entropy.
+- It achieves its unique maximum at the centroid $(1/3, 1/3, 1/3)$.
+- It achieves its minimum (zero) at the three vertices.
+- Along any edge of the simplex (one category absent), it reduces to the binary entropy $H_b(p) = -p\log_2 p - (1-p)\log_2(1-p) \leq 1\,\text{bit}$.
+
+<Accordion title="Convexity Proof and Geometric Intuition">
+
+To prove $H(X)$ is concave over the simplex, consider the Hessian of $H$ with respect to independent coordinates $(p_1, p_2)$ with $p_3 = 1 - p_1 - p_2$:
+
+$$\frac{\partial^2 H}{\partial p_i^2} = -\frac{1}{p_i \ln 2} < 0, \qquad \frac{\partial^2 H}{\partial p_i \partial p_j} = 0 \quad (i \neq j, \text{ for simple case})$$
+
+The Hessian is negative definite wherever $p_i > 0$, confirming strict concavity. Geometrically, the entropy surface over the simplex is a smooth dome with maximum at the centroid.
+
+The implication for adherence monitoring: adding a new category of non-adherence (e.g., a patient who previously always missed but now sometimes takes late) **increases** $H$ even if $p_{missed}$ decreases. This captures the intuition that a new irregular pattern is more concerning than a consistently bad-but-predictable one.
+
+</Accordion>
+
+---
+
+## Rolling Window and Nightly Computation
+
+You compute $H(X)$ on a **7-day rolling window** updated nightly at 00:00 local time:
+
+$$H_t = H\!\left(p_1^{(t)}, p_2^{(t)}, p_3^{(t)}\right)$$
+
+where superscript $(t)$ denotes the empirical counts over the 7 days preceding midnight on day $t$.
+
+**Window length rationale:** 7 days provides $N = 7 \times d$ dose events (where $d$ is doses per day). For a once-daily medication ($d = 1$, $N = 7$), the minimum detectable probability shift is $\Delta p = 1/7 \approx 0.14$, giving an entropy resolution of approximately 0.05 bits — sufficient to distinguish the alert thresholds below.
+
+For medications with higher daily frequency ($d = 4$, $N = 28$), the entropy estimate has tighter confidence intervals. You can bound the estimation variance using the asymptotic expansion:
+
+$$\text{Var}[\hat{H}] \approx \frac{1}{N}\sum_i p_i \left(\log_2 p_i\right)^2 - \frac{H^2}{N}$$
+
+---
+
+## Alert Threshold Logic
+
+The entropy value $H_t$ is mapped to three operational tiers that drive the intervention cascade:
+
+<CardGroup cols={3}>
+  <Card title="Excellent Adherence" icon="check-circle">
+    $$H < 0.3\,\text{bits}$$
+
+    Pattern is highly predictable — doses taken on schedule with only minor variation. No action required. Weekly summary report generated.
+  </Card>
+  <Card title="Moderate Irregularity" icon="triangle-exclamation">
+    $$0.3 \leq H < 0.8\,\text{bits}$$
+
+    Noticeable but non-critical variability. HollowCore escalates reminder frequency: vocal reminders via SphereAI increase from once to three times per dose window. Caregiver app shows amber status.
+  </Card>
+  <Card title="Poor Adherence" icon="circle-xmark">
+    $$H \geq 0.8\,\text{bits}$$
+
+    Irregular, near-unpredictable pattern. Immediate caregiver notification dispatched via Firebase Cloud Messaging. HollowRover autonomous delivery protocol activated for all subsequent dose windows.
+  </Card>
+</CardGroup>
+
+The threshold $H = 0.8$ corresponds approximately to a distribution of $(p_1, p_2, p_3) = (0.6, 0.2, 0.2)$ — 60% on-time, 20% late, 20% missed — which clinical literature associates with significantly elevated medication-related adverse event risk.
+
+<Warning>
+The entropy thresholds above are **calibrated defaults**. For care recipients on anticoagulants, anti-epileptics, or immunosuppressants, you should lower the `POOR_ADHERENCE` threshold to $H \geq 0.5$ in the HollowCore configuration to reflect the narrower therapeutic windows of these drug classes.
+</Warning>
+
+---
+
+## Connection to Isolation Forest Anomaly Scoring
+
+High medication entropy is not merely a standalone alert condition — it is a **feature dimension** fed directly into the Isolation Forest biometric anomaly scorer running in SphereAI.
+
+The reasoning is clinical: poor medication adherence is itself a health risk. Missed antihypertensives can cause blood pressure spikes; missed antidiabetics alter glucose regulation; missed psychotropics increase seizure and fall risk. Therefore:
+
+$$\mathbf{x}_{anomaly} = \begin{bmatrix} \text{RMSSD} \\ LF/HF \\ C_{est} \\ G_{baseline} \\ H_{adherence} \\ \eta_{sleep} \\ T_{skin} \end{bmatrix}$$
+
+Each dimension is z-scored against the rolling 30-day personal baseline $\mu_i$, $\sigma_i$ before being passed to the Isolation Forest:
+
+$$\tilde{x}_i = \frac{x_i - \mu_i}{\sigma_i}$$
+
+The Isolation Forest assigns an anomaly score $s(\mathbf{x}) \in [0, 1]$ via path-length averaging over 100 trees. When $H_{adherence}$ is elevated (e.g., $H = 1.2\,\text{bits}$), its z-scored contribution pulls $s(\mathbf{x})$ upward even if biometric signals appear normal — correctly capturing the scenario where a care recipient is physiologically compensating for missed medication in the short term but is at elevated risk in the medium term.
+
+<Accordion title="Feature Importance and Partial Dependence">
+
+In the calibrated SphereAI production model, the partial dependence of $s(\mathbf{x})$ on $H_{adherence}$ (all other features held at their median) follows a sigmoid-like increase:
+
+| $H_{adherence}$ (bits) | Marginal $\Delta s$ |
+|---|---|
+| 0.0 | +0.00 |
+| 0.3 | +0.02 |
+| 0.8 | +0.08 |
+| 1.2 | +0.15 |
+| 1.585 | +0.21 |
+
+At $H = 1.585$ (maximum entropy) the adherence feature alone contributes +0.21 to the anomaly score, which is sufficient to push a borderline-normal biometric profile into the `ANOMALY_MODERATE` alert tier. This cross-signal sensitivity is the key advantage of the multivariate Isolation Forest over independent per-signal thresholds.
+
+</Accordion>
+
+---
+
+## Firebase Data Schema
+
+Adherence events are stored in Firestore under the path `/lifesphere/hollowcore/med_schedule` with timestamp-indexed dose event documents:
+
+```
+/lifesphere/
+  hollowcore/
+    med_schedule/
+      {user_id}/
+        medications/
+          {med_id}/
+            doses/
+              {dose_timestamp_ms}/   ← document ID = scheduled time (Unix ms)
+                scheduled_time: Timestamp
+                confirmed_time: Timestamp | null
+                outcome: "on_time" | "late" | "missed"
+                delivery_method: "self" | "hollowrover"
+                entropy_window_bits: float   ← H_t at time of event
+```
+
+The `entropy_window_bits` field is written by the nightly Cloud Function that computes $H_t$ over the rolling 7-day window. Security rules restrict write access to the HollowCore service account; the caregiver application has read-only access.
+
+<Accordion title="Cloud Function: Nightly Entropy Computation">
+
+```python
+from collections import Counter
+from datetime import datetime, timedelta
+from firebase_admin import firestore
+
+def compute_adherence_entropy(user_id: str, med_id: str, window_days: int = 7) -> float:
+    """
+    Compute Shannon entropy of dose adherence outcomes over the rolling window.
+
+    Returns
+    -------
+    float
+        Entropy H in bits. Returns 0.0 if fewer than 3 dose events in window.
+    """
+    db = firestore.client()
+    cutoff = datetime.utcnow() - timedelta(days=window_days)
+
+    doses_ref = (
+        db.collection("lifesphere")
+          .document("hollowcore")
+          .collection("med_schedule")
+          .document(user_id)
+          .collection("medications")
+          .document(med_id)
+          .collection("doses")
+          .where("scheduled_time", ">=", cutoff)
+    )
+
+    outcomes = [doc.to_dict()["outcome"] for doc in doses_ref.stream()]
+
+    if len(outcomes) < 3:
+        return 0.0   # Insufficient data — assume perfect adherence
+
+    counts = Counter(outcomes)   # {"on_time": n1, "late": n2, "missed": n3}
+    N = len(outcomes)
+
+    H = 0.0
+    for count in counts.values():
+        if count > 0:
+            p = count / N
+            H -= p * math.log2(p)
+
+    return H
+```
+
+This function is invoked by a Cloud Scheduler job at 00:05 local time daily. The computed $H_t$ is written back to the most recent dose document and also published to the `biometric_features` Firestore collection for SphereAI to consume during its anomaly scoring cycle.
+
+</Accordion>
+
+---
+
+## Why Entropy Is More Informative Than a Missed-Dose Count
+
+<Tip>
+Consider two patients, each with 3 missed doses over the past 7 days out of 7 scheduled:
+
+**Patient A:** misses Monday, Tuesday, Wednesday (3 consecutive days) — $p_1 = 4/7$, $p_3 = 3/7$ → $H \approx 0.985\,\text{bits}$
+
+**Patient B:** misses Monday, Wednesday, Friday (alternating) — same counts, same $H \approx 0.985\,\text{bits}$
+
+**Patient C:** misses only evening doses (7 of 14 events over 7 days of twice-daily medication), always takes morning doses — $p_1 = 7/14$, $p_3 = 7/14$ → $H = 1.0\,\text{bit}$, **but a count-based system sees only "50% adherence"**
+
+With entropy, patients A and B are correctly rated identically (same distribution). But a simple missed-dose count would flag both identically to a patient who misses one dose per week for 3 weeks — a far less acute pattern. Entropy captures that 3 misses in 7 days is more irregular (and more immediately dangerous) than 3 misses in 21 days.
+
+More importantly, entropy detects **structured patterns** that counts miss entirely. A patient who always misses the evening dose but never misses the morning dose has $p_1 = 0.5$, $p_3 = 0.5$ → $H = 1.0\,\text{bit}$ — identical to a random misser. But when you decompose by time-of-day, the evening-specific subset has $H = 0$ (perfectly deterministic missing). The time-conditioned entropy $H(X | \text{time of day})$ is a planned extension that will enable intervention targeting: "evening reminders only" rather than blanket escalation.
+</Tip>

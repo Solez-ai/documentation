@@ -1,0 +1,215 @@
+---
+title: 'LifeSphere Inter-Subsystem Communication Protocol'
+sidebarTitle: 'Communication Protocol'
+description: 'The four-channel communication architecture that binds all five LifeSphere subsystems — from 150ms cloud state sharing to sub-10ms physical actuator control.'
+---
+
+
+LifeSphere operates five independent subsystems across two physical tiers — a cloud layer and a local hardware mesh. No two subsystems share a single communication channel exclusively. Instead, the system uses a layered protocol stack where each channel is selected by latency requirement, reliability tolerance, and physical proximity. A fall event and a light toggle require fundamentally different delivery guarantees; the protocol architecture reflects that distinction explicitly.
+
+The result is a communication model with no single point of failure. If the cloud channel degrades, local MQTT continues appliance control. If Wi-Fi disappears entirely, the GSM fallback sustains critical vital transmission. If a subsystem node crashes, all other nodes continue operating independently on their own watchdog timers.
+
+## Four-Channel Communication Stack
+
+<Tabs>
+  <Tab title="Firebase (Cloud)">
+    **Transport:** TCP with TLS 1.2+  
+    **Latency target:** ≤150ms end-to-end  
+    **Pattern:** Publish-subscribe via Firebase Realtime Database persistent listeners
+
+    Firebase Realtime Database is the primary inter-subsystem communication channel for all state that needs to be shared across the LifeSphere ecosystem. Every subsystem maintains a Firebase listener on the paths relevant to its function. When Vital32 writes a new `anomaly_score`, every listening process — SphereAI on the RDK X5, the guardian notification service, the HollowRover navigation controller — receives that update within the 150ms latency window without any subsystem needing to poll or query another.
+
+    This publish-subscribe model enforces a clean architectural separation: subsystems communicate through shared state, never through direct invocation. SphereAI does not call a HollowRover API. HollowRover does not subscribe to Vital32's event bus. Both subscribe to Firebase paths and react to the biological state.
+
+    **Primary use cases:**
+    - Cross-subsystem biological state propagation (`/lifesphere/vital32/*`)
+    - Emergency protocol triggers (`fall_detected`, `seizure_prob`, `anomaly_score`)
+    - Medication schedule distribution (`/lifesphere/hollowcore/med_schedule`)
+    - SphereAI emotional state updates (`/lifesphere/sphereai/*`)
+    - EntryGuard security event propagation (`/lifesphere/entryguard/*`)
+
+    ```python
+    # Attaching a real-time listener on the Python side
+    ref = db.reference('/lifesphere/vital32')
+    ref.listen(on_vital32_change)
+
+    # Writing subsystem state from Python
+    db.reference('/lifesphere/sphereai').update({
+        'emotional_state':  'anxious',
+        'stress_level':     0.74,
+        'loneliness_index': 0.61,
+        'cognitive_score':  0.88
+    })
+    ```
+
+    See [Firebase Architecture](/backend/firebase-architecture) for the complete JSON schema, security rules, and ESP32 write implementation.
+  </Tab>
+
+  <Tab title="MQTT (Local Wi-Fi)">
+    **Transport:** TCP over local Wi-Fi (no external exposure)  
+    **Broker:** Mosquitto, running on the HollowRover RDK X5  
+    **Latency target:** &lt;20ms  
+    **Pattern:** Topic-based publish-subscribe on the local network segment
+
+    Firebase introduces cloud round-trip latency that is acceptable for state synchronisation but excessive for real-time appliance control. Toggling a light, adjusting AC temperature, or activating a fan relay in response to a sensor event requires a response that feels instantaneous to the resident. MQTT on the local network delivers that.
+
+    Mosquitto runs as a service on the HollowRover's RDK X5. HollowCore — the environment automation node — subscribes to the `lifesphere/hollowcore/command` topic and executes relay commands directly.
+
+    **Primary topic:** `lifesphere/hollowcore/command`
+
+    **Command payload schema:**
+
+    ```json
+    {
+      "device": "light_1",
+      "state":  true
+    }
+    ```
+
+    ```python
+    import paho.mqtt.client as mqtt
+
+    broker = "192.168.1.100"   # RDK X5 local IP
+    client = mqtt.Client()
+    client.connect(broker, 1883, 60)
+
+    # Turn on bedroom light
+    client.publish(
+        "lifesphere/hollowcore/command",
+        '{"device": "light_1", "state": true}'
+    )
+
+    # Set AC to 24°C
+    client.publish(
+        "lifesphere/hollowcore/command",
+        '{"device": "ac", "target_temp": 24}'
+    )
+    ```
+
+    **Supported device identifiers:**
+
+    | Device ID | Type | State values |
+    |---|---|---|
+    | `light_1` – `light_n` | Light relay | `true` / `false` |
+    | `fan` | Fan relay | `true` / `false` |
+    | `ac` | Air conditioner | `{"target_temp": <float>}` |
+    | `door_lock` | Magnetic lock | `true` (locked) / `false` (unlocked) |
+
+    MQTT traffic never leaves the local network. The Mosquitto broker binds to `127.0.0.1` and the local subnet interface only. There is no port forwarding, no external broker, and no TLS overhead required — the local network segment is the trust boundary.
+  </Tab>
+
+  <Tab title="Serial Bridge (UART)">
+    **Transport:** Physical UART at 115200 baud  
+    **Latency target:** &lt;10ms  
+    **Pattern:** Command-response over two dedicated UART channels  
+    **Nodes:** RDK X5 ↔ Drivetrain ESP32 and RDK X5 ↔ Manipulator ESP32
+
+    Motor control and physical actuator commands cannot tolerate network jitter. A navigation correction sent to the drivetrain or a gripper position update sent to the robotic arm manipulator must arrive and execute within a deterministic time window. Wi-Fi — even local Wi-Fi — introduces variable latency that is incompatible with closed-loop motor control at the update rates required by ROS2 Nav2.
+
+    HollowRover uses two dedicated UART channels on the RDK X5 to bridge ROS2 on the application processor to the two ESP32 microcontrollers that drive physical hardware:
+
+    **UART Channel 1 — Drivetrain ESP32**  
+    Handles wheel motor PWM commands, encoder feedback, and odometry reporting. ROS2 Nav2 sends velocity commands (`/cmd_vel`) which the UART bridge serialises and forwards to the Drivetrain ESP32 for direct motor driver execution.
+
+    **UART Channel 2 — Manipulator ESP32**  
+    Handles the six-DOF robotic arm servo positions, the medication dispensing actuator, and the end-effector gripper. ROS2 MoveIt trajectory points are serialised and forwarded over this channel at the servo update rate.
+
+    ```cpp
+    // ESP32 UART command receiver (Drivetrain)
+    void loop() {
+      if (Serial.available() >= sizeof(DriveCommand)) {
+        DriveCommand cmd;
+        Serial.readBytes((char*)&cmd, sizeof(DriveCommand));
+        set_motor_pwm(cmd.left_pwm, cmd.right_pwm);
+      }
+    }
+    ```
+
+    ```python
+    # RDK X5 Python UART bridge
+    import serial, struct
+
+    uart_drive = serial.Serial('/dev/ttyS1', 115200, timeout=0.01)
+
+    def send_drive_command(left_pwm: int, right_pwm: int):
+        packet = struct.pack('hh', left_pwm, right_pwm)
+        uart_drive.write(packet)
+    ```
+
+    The physical UART channel is immune to Wi-Fi degradation, network congestion, and software stack latency above the OS serial driver. This makes it the only appropriate transport for safety-critical actuator control, where a delayed or dropped command could result in a collision or a failed medication dispense.
+  </Tab>
+
+  <Tab title="GSM Fallback (SIM800L)">
+    **Transport:** Cellular data and SMS via SIM800L module  
+    **Latency:** ~2–5 seconds (data); near-immediate (SMS)  
+    **Activation:** Automatic on Wi-Fi outage detection  
+    **Purpose:** Sustained emergency communication and reduced-bandwidth vital transmission during connectivity loss
+
+    Wi-Fi outages in residential environments are not rare events. Router reboots, ISP interruptions, and physical interference are all realistic failure modes for a 24/7 deployed caregiving system. LifeSphere treats Wi-Fi outage as an expected operational condition, not an edge case, and maintains a full cellular fallback path.
+
+    **Fallback activation sequence:**
+
+    1. Vital32 detects Wi-Fi beacon loss after a configurable timeout (default: 15 seconds).
+    2. HollowRover detects the same condition via its own Wi-Fi stack.
+    3. HollowRover activates its **local Wi-Fi hotspot** mode, broadcasting a known SSID on the local RF environment.
+    4. Vital32 reconnects to HollowRover's hotspot, restoring its ability to transmit vital data — now routed through HollowRover's SIM800L cellular uplink rather than the residential router.
+    5. SIM800L establishes a GPRS/LTE data session and resumes Firebase writes for critical fields only: `fall_detected`, `seizure_prob`, `anomaly_score`, and `timestamp`.
+    6. Guardian SMS notifications remain available throughout the outage via direct SIM800L SMS transmission — independent of any data channel.
+
+    ```cpp
+    // SIM800L AT command sequence for SMS emergency alert
+    void send_sms_alert(const char* number, const char* message) {
+      SIM800L.println("AT+CMGF=1");         // Text mode
+      delay(100);
+      SIM800L.print("AT+CMGS=\"");
+      SIM800L.print(number);
+      SIM800L.println("\"");
+      delay(100);
+      SIM800L.println(message);
+      SIM800L.write(26);                    // Ctrl+Z to send
+    }
+    ```
+
+    During GSM-only operation, MQTT appliance commands are suspended (HollowCore is unreachable from outside the local network), but Vital32 biosensing, emergency protocol dispatch via SMS, and HollowRover autonomous navigation — which relies on local SLAM, not cloud connectivity — all continue without interruption.
+  </Tab>
+</Tabs>
+
+## Channel Latency Reference
+
+| Channel | Transport | Latency Target | Primary Use Case |
+|---|---|---|---|
+| Firebase | TCP / TLS | ≤150ms | Cross-subsystem biological state sharing and protocol triggers |
+| MQTT | Local Wi-Fi | &lt;20ms | Appliance relay commands and environment automation |
+| UART Serial | Physical wire | &lt;10ms | Motor control, robotic arm actuation, medication dispensing |
+| GSM SIM800L | Cellular | ~2–5s | Outage fallback — critical vital transmission and SMS alerting |
+
+## Distributed Intelligence and Fault Isolation
+
+LifeSphere is architecturally allergic to single points of failure. Each subsystem is designed to continue its primary function independently if any other subsystem becomes unavailable.
+
+**If HollowRover is docked and charging:** Vital32 continues biosensing and writing to Firebase. SphereAI continues emotional inference from available voice and wearable signals. EntryGuard continues face recognition and access control. Guardian notifications remain active.
+
+**If one ESP32 node fails:** The remaining ESP32 nodes on Vital32 continue operating. The sensor fusion model degrades gracefully — a missing GSM module does not prevent heart rate or SpO₂ from being reported. HollowRover's drivetrain and manipulator operate on separate ESP32 nodes; a failure in one does not immobilise the other.
+
+**If SphereAI inference is unavailable:** HollowRover continues medication delivery on the committed schedule. Vital32 continues anomaly detection. Emergency protocols continue to trigger on threshold events. SphereAI's absence reduces emotional context but does not disable safety-critical function.
+
+**If Firebase is unreachable:** MQTT appliance control continues on the local network. UART motor control continues at full bandwidth. Local SD card buffering on HollowRover retains all vital data for replay on reconnection. GSM fallback activates for emergency-only Firebase writes.
+
+All five subsystems implement independent watchdog timers. Each watchdog monitors the subsystem's own critical processes and the expected heartbeat signals from peer subsystems. On detecting an unresponsive node, the watchdog initiates a reconnection sequence and transmits a guardian notification identifying the specific subsystem that has gone silent.
+
+## Security Architecture
+
+<Info>
+  The RDK X5 at the core of HollowRover carries a **10 TOPS Neural Processing Unit (NPU)** on dedicated silicon, separate from the quad-core ARM Cortex-A55 application CPU. SphereAI inference — including the emotional classifier, loneliness index computation, and cognitive coherence scoring — executes entirely on the NPU. ROS2 Nav2 path planning and SLAM map updates execute on the CPU cores. The two workloads run on separate silicon and share no execution pipeline. This eliminates the latency contention that would otherwise force a tradeoff between AI inference quality and navigation responsiveness — a tradeoff that would be untenable in a system where both must operate in real time simultaneously.
+</Info>
+
+| Surface | Mechanism |
+|---|---|
+| Firebase traffic | TLS 1.2+ on all TCP connections; `auth !== null` database rules |
+| MQTT broker | Bound to local network interface only; no external port exposure |
+| UART channels | Physical wires; no network attack surface |
+| GSM channel | SIM PIN protected; used only for emergency payloads |
+| Face recognition profiles | Stored locally on HollowRover SD card only; never uploaded to cloud |
+| Service account credentials | Injected at runtime via environment variable; never stored in firmware or source control |
+
+Face recognition profile data — the biometric embeddings used by EntryGuard to distinguish family members from unknown visitors — is stored exclusively on HollowRover's local storage and is never transmitted to any external service. All facial identification inference runs on the RDK X5 NPU. The resident's biometric identity does not leave the physical premises.

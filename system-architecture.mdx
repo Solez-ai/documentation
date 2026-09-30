@@ -1,0 +1,222 @@
+---
+title: 'LifeSphere System Architecture and Data Flow'
+sidebarTitle: 'Architecture'
+description: 'Deep-dive into the shared biological state schema, publish-subscribe data flow, multi-timescale inference cycles, and fault-tolerance design of LifeSphere.'
+---
+
+
+LifeSphere is not a collection of smart devices that happen to share a network. It is a distributed intelligence system with a single, continuously updated representation of the resident's biological and environmental state. Every subsystem reads from that representation, acts on it, and writes back to it. The coherence of that shared state — its freshness, its integrity, and its availability under degraded conditions — is the architectural problem the system is designed to solve.
+
+## Distributed Intelligence Model
+
+Each of LifeSphere's five subsystems runs its own inference and actuation logic. There is no single orchestrator that issues commands to subordinate nodes. Instead, subsystems are **reactive to state** rather than responsive to instructions. When the biological state changes — when an anomaly score climbs, when a fall flag is set, when the loneliness index crosses a threshold — every subscribed subsystem evaluates the new state against its own response logic and acts accordingly.
+
+This publish-subscribe architecture produces several properties that a centralized controller cannot:
+
+- **No single point of failure.** If the SphereAI backend becomes temporarily unreachable, Vital32 continues sampling, HollowRover continues navigating, and EntryGuard continues monitoring. The system degrades gracefully rather than failing catastrophically.
+- **Sub-additive latency.** Subsystems do not wait for a coordinator to process an event and re-dispatch it. They receive the state update directly and begin response computation in parallel. The 150 ms end-to-end target is achievable precisely because no intermediate hop exists.
+- **Compositional behavior.** Complex coordinated responses — the HollowRover dispatching medication while HollowCore lowers ambient temperature and SphereAI initiates a calming dialogue — emerge from each subsystem independently reading the same state, rather than from a choreographed command sequence.
+
+<Info>
+  The Firebase Realtime Database serves as the shared biological state backbone. Its WebSocket-based push protocol means subsystems receive updates within the 150 ms target without polling. All writes are timestamped at the source to allow downstream subsystems to detect and discard stale state during network recovery.
+</Info>
+
+## The Shared Biological State Object
+
+The entire ecosystem's understanding of the resident is encoded in a single Firebase Realtime Database document. Every subsystem has read access to the full document. Write access is partitioned by namespace — each subsystem can only write to its own key.
+
+```json
+{
+  "lifesphere": {
+    "vital32": {
+      "heart_rate": 72,
+      "spo2": 98.2,
+      "skin_temp": 36.4,
+      "hrv_rmssd": 42.1,
+      "hrv_lf_hf": 1.8,
+      "gsr": 0.34,
+      "bio_age": 68.4,
+      "anomaly_score": 0.12,
+      "seizure_prob": 0.03,
+      "cortisol_est": 14.2,
+      "fall_detected": false,
+      "immune_alert": false,
+      "timestamp": 1720000000000
+    },
+    "sphereai": {
+      "emotional_state": "calm",
+      "stress_level": 0.21,
+      "loneliness_index": 0.15,
+      "cognitive_score": 0.94
+    },
+    "hollowrover": {
+      "status": "idle",
+      "battery": 87
+    },
+    "hollowcore": {
+      "ac_temp": 24,
+      "fan": false
+    },
+    "entryguard": {
+      "mode": "passive",
+      "intruder_detected": false
+    }
+  }
+}
+```
+
+### Field Reference
+
+| Field | Subsystem | Type | Description |
+|---|---|---|---|
+| `heart_rate` | vital32 | float | Beats per minute from MAX30102 PPG sensor |
+| `spo2` | vital32 | float | Blood oxygen saturation percentage |
+| `skin_temp` | vital32 | float | Peripheral skin temperature in °C (MLX90614) |
+| `hrv_rmssd` | vital32 | float | Root mean square of successive RR interval differences |
+| `hrv_lf_hf` | vital32 | float | LF/HF power ratio — sympathovagal balance indicator |
+| `gsr` | vital32 | float | Galvanic skin response in µS — electrodermal arousal proxy |
+| `bio_age` | vital32 | float | Computed biological age from multi-parameter ML model |
+| `anomaly_score` | vital32 | float | Isolation Forest anomaly score [0.0–1.0]; >0.9 triggers emergency |
+| `seizure_prob` | vital32 | float | LSTM seizure probability [0.0–1.0]; >0.85 triggers seizure protocol |
+| `cortisol_est` | vital32 | float | Estimated cortisol (µg/dL) derived from HRV and GSR fusion |
+| `fall_detected` | vital32 | bool | True when MPU6050 impact + post-fall stillness pattern confirmed |
+| `immune_alert` | vital32 | bool | True when bioimpedance + temperature indicate immune activation |
+| `timestamp` | vital32 | int64 | Unix epoch milliseconds at sensor write time |
+| `emotional_state` | sphereai | string | Categorical label: `calm`, `anxious`, `distressed`, `content`, `lonely` |
+| `stress_level` | sphereai | float | Normalized stress index [0.0–1.0] from tri-agent consensus |
+| `loneliness_index` | sphereai | float | Rolling loneliness estimate [0.0–1.0]; >0.70 triggers social intervention |
+| `cognitive_score` | sphereai | float | Coherence score from conversation analysis [0.0–1.0] |
+| `status` | hollowrover | string | Robot operational state: `idle`, `navigating`, `dispensing`, `emergency` |
+| `battery` | hollowrover | int | Robot battery percentage |
+| `ac_temp` | hollowcore | int | Current AC setpoint in °C |
+| `fan` | hollowcore | bool | Fan relay state |
+| `mode` | entryguard | string | Security mode: `passive`, `alert`, `lockdown` |
+| `intruder_detected` | entryguard | bool | True when face recognition returns no authorized match |
+
+<Note>
+  The `timestamp` field in the `vital32` namespace is the authoritative event time for all downstream processing. During network recovery, subsystems compare incoming `timestamp` values against their last-processed timestamp and discard any updates with older values to prevent stale state from triggering false responses.
+</Note>
+
+## Inter-Subsystem Communication Protocol
+
+LifeSphere operates a two-channel communication model: a cloud path for cross-subsystem state synchronization and a local path for low-latency hardware coordination. The two channels are complementary rather than redundant — each carries different traffic.
+
+<Tabs>
+  <Tab title="Firebase Cloud Channel">
+    **Protocol:** WebSocket (Firebase Realtime Database SDK)
+
+    **Target latency:** 150 ms end-to-end
+
+    **Traffic carried:** Full biological state object updates, all anomaly flags, emotional state assessments, actuation confirmations
+
+    **How it works:** Every subsystem maintains a persistent WebSocket connection to Firebase. When any namespace is written, Firebase immediately pushes the delta to all active listeners. The ESP32-based Vital32 uses the `FirebaseESP32` library; Python-based backend services use the `firebase-admin` SDK with `ref.listen()` callbacks.
+
+    **Failure mode:** On disconnect, the Firebase SDK buffers writes locally and replays them on reconnect. The maximum tolerated disconnection window before SD card fallback activates is configurable; the default is 30 seconds.
+  </Tab>
+  <Tab title="MQTT Local Channel">
+    **Protocol:** MQTT over local Wi-Fi (broker: HollowCore Raspberry Pi)
+
+    **Target latency:** &lt;10 ms
+
+    **Traffic carried:** High-frequency sensor samples (raw PPG waveform, raw accelerometer data) that are too voluminous for Firebase and too time-sensitive for round-trip cloud latency
+
+    **How it works:** Vital32 publishes raw sensor streams to the local MQTT broker at up to 100 Hz. HollowRover's ROS2 navigation stack subscribes to fall and seizure events from the MQTT broker to enable sub-second physical response initiation, independent of Firebase availability.
+
+    **Failure mode:** If the local MQTT broker (HollowCore Pi) becomes unreachable, Vital32 falls back to Firebase-only operation. Raw waveform logging continues to the SD card.
+  </Tab>
+  <Tab title="Serial Bridge">
+    **Protocol:** UART serial at 115200 baud
+
+    **Traffic carried:** Direct hardware commands between HollowCore's relay controller and HollowRover's Arduino Mega co-processor; medication dispenser carousel position commands
+
+    **How it works:** The HollowCore Raspberry Pi maintains a serial bridge process that translates Firebase state changes into relay actuation commands for the Arduino Mega. This eliminates the Wi-Fi dependency for physical actuator control — the relay controller responds to serial commands regardless of network state.
+
+    **Failure mode:** If the Pi serial bridge process crashes, the Arduino Mega's watchdog timer restarts the bridge process within 8 seconds. In the interim, the last commanded relay state is held.
+  </Tab>
+  <Tab title="GSM Fallback">
+    **Protocol:** AT commands over UART to SIM800L / SIM7600 module
+
+    **Traffic carried:** Emergency SMS notifications, critical vital sign summaries, caregiver alerts
+
+    **How it works:** When both Firebase and MQTT connectivity are lost for more than 60 seconds, the ESP32 activates the GSM module and sends a formatted emergency SMS to all registered caregiver numbers. The SMS payload includes the last valid heart rate, SpO₂, fall status, and anomaly score.
+
+    **Failure mode:** GSM is the terminal fallback. If GSM is also unavailable, the 24-hour SD card buffer preserves all biometric data for post-event forensic review. The system continues local MQTT operation regardless of uplink availability.
+  </Tab>
+</Tabs>
+
+## Multi-Timescale Inference
+
+LifeSphere's AI pipeline runs at three distinct temporal resolutions. This is not a scheduling convenience — it reflects the different physiological and behavioral timescales at which meaningful health events unfold.
+
+| Cycle | Period | Compute Location | What Runs |
+|---|---|---|---|
+| **Short cycle** | 30 seconds | ESP32 (on-device) + Firebase trigger | Isolation Forest anomaly scoring on current vital window; fall detection confirmation; SpO₂ and heart rate threshold checks; immediate seizure probability update from LSTM on 30-second RR interval sequence |
+| **Medium cycle** | 15 minutes | Cloud Function (Node.js) | HRV trend analysis across 30-minute rolling window; cortisol estimate refresh from HRV + GSR fusion; loneliness index update from SphereAI tri-agent; HollowRover medication schedule check; HollowCore biofeedback recalibration |
+| **Long cycle** | 24 hours | Cloud Function (Python) | Biological age model refit on 24-hour biometric record; immune status assessment from temperature and bioimpedance trending; medication adherence entropy calculation; cognitive score longitudinal drift analysis; risk prior update for next day's short-cycle anomaly scoring |
+
+<Tip>
+  The long-cycle biological age computation uses a gradient-boosted ensemble trained on the resident's own longitudinal data, not population norms. This means the model becomes more personalized and more accurate the longer LifeSphere operates — a property described in detail in the [AI Pipeline Overview](/ai/pipeline-overview).
+</Tip>
+
+## Fault Tolerance and Graceful Degradation
+
+LifeSphere is designed to remain protective under hardware failure, power loss, and network interruption. No single component failure silences the system.
+
+**Power subsystem:**
+A 5000 mAh LiPo battery pack with automatic switchover provides uninterrupted operation through grid power loss. Under battery power, non-critical peripherals (OLED display, RGB indicators) are suspended to extend runtime. Core sensing, Firebase write, and GSM fallback remain active.
+
+**Local data persistence:**
+Vital32 writes every sensor sample to an onboard micro-SD card regardless of network connectivity. The buffer capacity covers 24 hours of continuous sampling at full resolution. On network recovery, the ESP32 replays buffered writes to Firebase in chronological order, maintaining the complete biometric record.
+
+**Watchdog timers:**
+Every microcontroller in the ecosystem — ESP32 (Vital32), Arduino Mega (HollowRover), and the relay controller (HollowCore) — runs a hardware watchdog timer. If the main application loop fails to reset the watchdog within the configured interval (default: 8 seconds for ESP32, 4 seconds for Arduino Mega), the watchdog triggers a hard reset and the firmware reinitializes from a known-good state.
+
+**Process supervision:**
+All long-running Python processes on the HollowCore Raspberry Pi are managed by `systemd` with `Restart=always` policy. The MQTT broker, the Firebase listener, and the serial bridge are all supervised services that restart automatically on crash.
+
+<Warning>
+  Watchdog-triggered resets on the ESP32 produce a gap in the Firebase write stream. The downstream anomaly detection system is calibrated to treat a gap of more than 15 seconds as an implicit anomaly signal — it initiates a reduced-confidence alert rather than silently ignoring the missing data.
+</Warning>
+
+## Security and Data Integrity
+
+**Transport security:**
+All Firebase communications use TLS 1.3. The Firebase Realtime Database is configured with authenticated-access-only rules — unauthenticated reads and writes are rejected at the database level. ESP32 devices authenticate using short-lived Firebase tokens refreshed every hour.
+
+**Facial recognition privacy:**
+EntryGuard performs all face recognition computation locally on the Raspberry Pi using a quantized FaceNet model. Raw facial images and face embeddings are never transmitted outside the local network. The only value that leaves the device is a boolean authorization result (`authorized: true/false`). This architecture is a hard constraint, not a configuration option.
+
+**Mandatory human authorization for defensive actions:**
+Before any action that restricts physical access — engaging the smart lock in lockdown mode, activating RF jamming countermeasures, placing the building's entry system in alert mode — EntryGuard requires explicit confirmation from a registered caregiver via a time-limited out-of-band authorization token. Autonomous defensive action without human confirmation is not a permitted system state.
+
+**Database security rules:**
+```json
+{
+  "rules": {
+    "lifesphere": {
+      "vital32": {
+        ".read": "auth != null",
+        ".write": "auth != null && auth.uid === 'vital32-device'"
+      },
+      "sphereai": {
+        ".read": "auth != null",
+        ".write": "auth != null && auth.uid === 'sphereai-service'"
+      },
+      "hollowrover": {
+        ".read": "auth != null",
+        ".write": "auth != null && auth.uid === 'hollowrover-device'"
+      },
+      "hollowcore": {
+        ".read": "auth != null",
+        ".write": "auth != null && auth.uid === 'hollowcore-device'"
+      },
+      "entryguard": {
+        ".read": "auth != null",
+        ".write": "auth != null && auth.uid === 'entryguard-device'"
+      }
+    }
+  }
+}
+```
+
+Each subsystem authenticates with a unique service account scoped only to its own namespace. A compromised Vital32 device cannot write to the `entryguard` namespace and trigger a false lockdown.

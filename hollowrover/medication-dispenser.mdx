@@ -1,0 +1,267 @@
+---
+title: 'HollowRover Autonomous Medication Dispensing System'
+sidebarTitle: 'Medication Dispenser'
+description: 'Four-slot autonomous dispensing system with prescription OCR onboarding, Firebase schedule sync, touch UI, water delivery, and adherence entropy modeling.'
+---
+
+
+<Info>
+  The medication dispensing system combines autonomous schedule execution with a physical manual fallback, ensuring that a connectivity loss or software fault never leaves a care recipient without access to their medication.
+</Info>
+
+HollowRover's dispensing system is a **four-slot autonomous delivery unit** integrated with the LifeSphere Firebase backend. Medication schedules are populated once through a prescription OCR pipeline in the mobile app, validated by the user, and thereafter executed by the rover without further input. A resistive touchscreen interface on the rover chassis provides a fully offline manual fallback.
+
+---
+
+## Physical Dispensing Hardware
+
+### Slot Configuration
+
+Four **SG90 micro servos** drive individual dispensing gates — one per medication slot. Each servo is directly driven by the Manipulator ESP32 over dedicated PWM GPIO lines.
+
+| Slot | GPIO | Servo | Default State |
+|---|---|---|---|
+| **A** | GPIO16 | SG90 | Gate closed (0°) |
+| **B** | GPIO17 | SG90 | Gate closed (0°) |
+| **C** | GPIO18 | SG90 | Gate closed (0°) |
+| **D** | GPIO19 | SG90 | Gate closed (0°) |
+
+A dispense cycle for a given slot:
+1. Servo rotates to **90°** (gate open) — held for 800 ms
+2. Servo returns to **0°** (gate closed)
+3. The RDK X5 receives a `DISPENSE_COMPLETE` confirmation over UART
+4. Firebase record at `/lifesphere/hollowcore/med_schedule/{entryId}/last_dispensed` is updated with a UTC timestamp
+
+### Water Delivery
+
+A **5 V peristaltic pump** draws from a 100 ml onboard reservoir tank. The pump is controlled by a relay on **GPIO12** of the Manipulator ESP32. Pump activation accompanies every scheduled dispense — the relay opens for 3 seconds, delivering approximately 15 ml of water, sufficient to assist medication ingestion.
+
+The reservoir requires manual refilling when empty. A float sensor (optional, GPIO-connected) can trigger a `WaterLow` notification via Firebase when the reservoir drops below 20 ml.
+
+---
+
+## Prescription OCR Onboarding
+
+Users configure the dispensing schedule once through the LifeSphere mobile app. The process requires no manual data entry — the prescription itself is the input.
+
+<Steps>
+  <Step title="Photograph prescription">
+    The user opens the **Medication Setup** screen in the app and photographs the printed prescription. The image is uploaded to Firebase Storage and queued for Vision AI processing. The prescription does not need to be a clean studio photograph — the Vision AI pipeline handles skew, glare, and partial occlusion.
+  </Step>
+  <Step title="Vision AI extraction">
+    A Cloud Function invokes the Vision AI model (running on LifeSphere's backend infrastructure) which extracts the following fields from the prescription image:
+
+    | Field | Example |
+    |---|---|
+    | Medicine name | `Metformin 500 mg` |
+    | Dosage | `1 tablet` |
+    | Frequency | `Twice daily — morning and evening` |
+    | Duration | `90 days` |
+    | Prescribing physician | `Dr. A. Osei` |
+
+    The extracted schedule is written as a structured document to `/lifesphere/hollowcore/med_schedule/{newEntryId}` with a `status: "pending_review"` flag.
+  </Step>
+  <Step title="User review and slot assignment">
+    The app presents the extracted schedule to the user for confirmation. The user:
+    - Verifies the medicine name and dosage
+    - Assigns the medication to a physical slot (A, B, C, or D)
+    - Confirms the delivery times
+
+    Until the user explicitly taps **Confirm**, the schedule status remains `pending_review` and HollowRover takes no dispensing action. This review step is mandatory and cannot be bypassed programmatically.
+  </Step>
+  <Step title="Schedule activation">
+    On user confirmation, the app updates the schedule document status to `active`. HollowRover's `hollowrover_firebase/firebase_bridge.py` node detects the status change via a Firestore real-time listener and loads the schedule into the `medication_delivery.py` protocol node's execution queue.
+  </Step>
+</Steps>
+
+<Warning>
+  The Vision AI extraction step processes the prescription image server-side and stores extracted data in Firebase. Ensure the user has reviewed and consented to LifeSphere's health data handling policy before photographing prescription documents. Extracted data is encrypted at rest and never used for purposes other than schedule execution.
+</Warning>
+
+---
+
+## Firebase Schedule Schema
+
+```json
+// /lifesphere/hollowcore/med_schedule/{entryId}
+{
+  "entry_id": "med_001",
+  "medicine_name": "Metformin 500 mg",
+  "dosage": "1 tablet",
+  "slot": "A",
+  "frequency": "twice_daily",
+  "delivery_times_utc": ["07:00", "19:00"],
+  "duration_days": 90,
+  "start_date": "2025-01-15",
+  "status": "active",
+  "last_dispensed": "2025-01-16T07:00:43Z",
+  "adherence_log": [
+    { "scheduled": "2025-01-15T07:00:00Z", "dispensed": "2025-01-15T07:00:38Z" },
+    { "scheduled": "2025-01-15T19:00:00Z", "dispensed": "2025-01-15T19:01:02Z" }
+  ]
+}
+
+// /lifesphere/hollowcore/dispenser_manual
+{
+  "slot": "B",
+  "dose": "1 tablet",
+  "requested_at": "2025-01-16T14:22:00Z",
+  "requested_by": "manual_touch_ui",
+  "status": "pending"
+}
+```
+
+---
+
+## Manual Fallback: Touchscreen Interface
+
+The rover's dispenser panel mounts a **3.5" ILI9488 TFT LCD** (480×320 px) driven over SPI and a **XPT2046 resistive touch controller**. Both are driven by the Manipulator ESP32 using the **TFT_eSPI** library. This interface operates fully offline — it writes directly to Firebase when connectivity is available, but will also queue commands locally if the network is unavailable, flushing when connectivity is restored.
+
+### Touch Handler
+
+```cpp
+void handleDispenserTouch() {
+  if (touchAvailable()) {
+    TouchPoint p = readXPT2046Touch();
+
+    // Map raw ADC touch coordinates to screen pixel space
+    int x = mapTouchX(p.x);   // XPT2046 raw X → 0..479
+    int y = mapTouchY(p.y);   // XPT2046 raw Y → 0..319
+
+    // Slot selection — four buttons across upper panel
+    if (insideButton(x, y, slotAButton)) { selectedSlot = "A"; }
+    if (insideButton(x, y, slotBButton)) { selectedSlot = "B"; }
+    if (insideButton(x, y, slotCButton)) { selectedSlot = "C"; }
+    if (insideButton(x, y, slotDButton)) { selectedSlot = "D"; }
+
+    // Confirm — dispatches to Firebase and triggers immediate dispense
+    if (insideButton(x, y, confirmButton)) {
+      renderConfirmationState();
+      Firebase.setJSON(
+        fbdo,
+        "/lifesphere/hollowcore/dispenser_manual",
+        buildManualSchedulePayload(selectedSlot, dose, time)
+      );
+    }
+  }
+}
+
+void drawDispenserUI() {
+  tft.fillScreen(TFT_BLACK);
+
+  // Header
+  tft.setTextColor(0xEF72, TFT_BLACK);   // #ef7025 approximated in RGB565
+  tft.setTextSize(2);
+  tft.drawString("Medication", 20, 20);
+
+  // Slot selector grid, dosage fields, schedule time controls, action buttons
+  drawMedicationSlots();
+  drawDosageFields();
+  drawScheduleControls();
+  drawButtonRegions();
+}
+```
+
+<Note>
+  `mapTouchX` and `mapTouchY` must be calibrated per-unit. XPT2046 raw ADC values vary with supply voltage and touch panel manufacturing tolerance. Run the `touch_calibration` sketch on first assembly — it collects four corner touch samples and writes the calibration coefficients to ESP32 NVS (non-volatile storage). TFT_eSPI will read these coefficients automatically on subsequent boots.
+</Note>
+
+### UI Layout
+
+```
+┌─────────────────────────────────────────┐
+│  Medication                    [LifeSphere] │
+├──────────┬──────────┬──────────┬──────────┤
+│  Slot A  │  Slot B  │  Slot C  │  Slot D  │  ← Slot selector (tap to select)
+│  [MET]   │  [ASP]   │  [---]   │  [---]   │
+├──────────┴──────────┴──────────┴──────────┤
+│  Dose:  [ 1 tablet  ▲▼ ]                  │
+│  Time:  [ Now ]  [ Schedule ]             │
+├───────────────────────────────────────────┤
+│         [ CONFIRM DISPENSE ]              │  ← Writes to Firebase
+└───────────────────────────────────────────┘
+```
+
+Slot labels (e.g., `MET`, `ASP`) are populated from the active Firebase schedule — the ESP32 fetches them at boot and on any schedule update. Empty slots display `---`.
+
+---
+
+## Medication Adherence Entropy Model
+
+HollowRover logs every dispense event — both scheduled and manual — to the `adherence_log` array in the schedule document. The LifeSphere backend computes an **adherence entropy** metric over each rolling 7-day window to quantify consistency.
+
+### Information-Theoretic Formulation
+
+Adherence entropy is computed using the Shannon entropy of the dispensing time distribution:
+
+$$
+H(X) = -\sum_{i} p(x_i) \log_2 p(x_i)
+$$
+
+Where $x_i$ represents a time-of-day bucket (the day is divided into 48 half-hour buckets) and $p(x_i)$ is the empirical probability of a dispense event falling into bucket $i$ over the observation window.
+
+**Interpreting entropy:**
+
+| Entropy Range | Interpretation |
+|---|---|
+| **H → 0 bits** | Near-perfect consistency — all dispenses occur at the same time |
+| **H = 1–2 bits** | Moderate regularity — slight timing drift, likely non-critical |
+| **H = 3–4 bits** | Irregular adherence — significant schedule deviation |
+| **H → log₂(48) ≈ 5.58 bits** | Maximum entropy — fully random timing, critical for time-sensitive medications |
+
+<AccordionGroup>
+  <Accordion title="Why Entropy Rather Than a Simple Miss Count?">
+    A miss-count metric treats a dose taken 20 minutes late identically to a dose taken 6 hours late, and it cannot distinguish between a patient who consistently takes medication in the morning (low risk) versus one who takes it at unpredictable times (higher pharmacokinetic risk). Entropy captures **distributional shape** — a low-entropy adherence log reflects reliable, predictable behavior regardless of whether every dose was taken exactly on schedule. This is more clinically informative than binary compliant/non-compliant classification.
+  </Accordion>
+  <Accordion title="Alert Thresholds">
+    Entropy thresholds are configurable per medication. Defaults:
+
+    - **H > 3.0 bits**: Guardian notification — "Medication timing has become irregular"
+    - **H > 4.5 bits**: Clinical escalation flag — "Adherence requires clinical review"
+
+    Time-sensitive medications (e.g., immunosuppressants, anticonvulsants) should use lower thresholds. Configure per-entry thresholds in the Firebase schedule document under `adherence_entropy_thresholds: { warn: 2.5, escalate: 3.5 }`.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Protocol Node: Automated Delivery Flow
+
+```python
+# hollowrover_protocols/medication_delivery.py (simplified)
+
+class MedicationDeliveryProtocol(Node):
+    """
+    Subscribes to Firebase med_schedule, executes autonomous delivery
+    at each scheduled UTC time. Uses Nav2 NavigateToPose to reach the
+    user's UWB-confirmed position before dispensing.
+    """
+
+    def on_schedule_trigger(self, entry: MedScheduleEntry):
+        # 1. Verify rover is not in a higher-priority protocol
+        if self.protocol_manager.active_priority > Priority.MEDICATION:
+            self.defer_delivery(entry, delay_seconds=60)
+            return
+
+        # 2. Get user's current UWB position
+        user_pose = self.get_user_pose()
+
+        # 3. Navigate to within 0.5 m of user
+        goal = NavigateToPose.Goal()
+        goal.pose = offset_pose(user_pose, distance=0.5)
+        self.nav2_client.send_goal_async(goal).add_done_callback(
+            lambda future: self.on_navigation_complete(future, entry)
+        )
+
+    def on_navigation_complete(self, future, entry: MedScheduleEntry):
+        if future.result().status != GoalStatus.STATUS_SUCCEEDED:
+            self.notify_guardian(f"Could not reach user for {entry.medicine_name} delivery")
+            return
+
+        # 4. Arm to medication_present pose, dispense, activate pump
+        self.arm_client.move_to_pose("medication_present")
+        self.dispenser_client.dispense_slot(entry.slot)
+        self.pump_client.activate(duration_seconds=3)
+
+        # 5. Log dispense to Firebase
+        self.firebase.log_dispense(entry.entry_id, datetime.utcnow())

@@ -1,0 +1,194 @@
+---
+title: "Heart Rate Variability and Biometric Signal Processing"
+sidebarTitle: "HRV & Signals"
+description: "RMSSD, LF/HF spectral decomposition, cortisol estimation, BIA hydration quantification, and Isolation Forest signal fusion on Vital32."
+---
+
+This page documents the signal processing pipeline that transforms raw sensor readings from the MAX30102, Grove GSR v1.0, AD5933, and MLX90614 into the physiologically meaningful biomarkers that Vital32 writes to the Firebase state object and feeds to the Isolation Forest anomaly scorer.
+
+---
+
+## Heart Rate Variability — RMSSD
+
+Heart rate variability (HRV) quantifies the beat-to-beat variation in the time intervals between successive heartbeats (RR intervals). It is a non-invasive proxy for autonomic nervous system tone: parasympathetic (vagal) dominance produces high variability; sympathetic dominance or physiological stress suppresses it.
+
+Vital32 extracts RR intervals from the **photoplethysmography (PPG) waveform** captured by the MAX30102. The PPG signal is bandpass filtered (0.5–4.0 Hz) to remove motion artifacts and DC baseline drift. Peak detection on the filtered waveform identifies successive systolic peaks; the inter-peak intervals form the RR series $\{RR_1, RR_2, \ldots, RR_N\}$ in milliseconds.
+
+### RMSSD Formula
+
+The root mean square of successive differences (RMSSD) is the primary time-domain HRV metric computed on Vital32. It is sensitive to rapid, vagally-mediated changes in autonomic tone.
+
+$$
+\text{RMSSD} = \sqrt{\frac{1}{N-1} \sum_{i=1}^{N-1} \left(RR_{i+1} - RR_i\right)^2}
+$$
+
+Where $N$ is the number of RR intervals in the analysis window (typically 30–60 seconds of data, yielding 30–80 intervals at resting heart rate).
+
+**Implementation:**
+
+```cpp
+float calculateRMSSD(float* rr_intervals, int n) {
+  float sum_sq_diff = 0.0;
+  for (int i = 0; i < n - 1; i++) {
+    float diff = rr_intervals[i + 1] - rr_intervals[i];
+    sum_sq_diff += diff * diff;
+  }
+  return sqrt(sum_sq_diff / (n - 1));
+}
+
+// LF band:  0.04–0.15 Hz  (sympathetic + parasympathetic)
+// HF band:  0.15–0.40 Hz  (parasympathetic / respiratory sinus arrhythmia)
+// Computed using arduinoFFT library on 256-sample RR window
+```
+
+RMSSD values above ~40 ms indicate healthy parasympathetic tone. Values below ~20 ms are associated with chronic stress, illness, or poor sleep recovery. Vital32 writes `hrv_rmssd` to Firebase every 30 seconds and uses its 1-hour rolling mean to anchor the Isolation Forest baseline.
+
+---
+
+## LF/HF Spectral Decomposition
+
+Spectral analysis of the RR interval series decomposes autonomic modulation into two physiologically distinct frequency bands.
+
+| Band | Range | Physiological Interpretation |
+|---|---|---|
+| **LF** (Low Frequency) | 0.04–0.15 Hz | Mixed sympathetic and parasympathetic modulation; baroreflex sensitivity |
+| **HF** (High Frequency) | 0.15–0.40 Hz | Predominantly parasympathetic (vagal) modulation; respiratory sinus arrhythmia |
+
+The **LF/HF ratio** is computed using Welch's method power spectral density (PSD) estimate, implemented via the [arduinoFFT](https://github.com/kosme/arduinoFFT) library on a **256-sample RR interval window** resampled to 4 Hz. Welch's method applies overlapping Hann-windowed segments to reduce spectral leakage from non-stationarity in the RR series.
+
+$$
+\text{LF/HF} = \frac{\int_{0.04}^{0.15} S_{RR}(f)\, df}{\int_{0.15}^{0.40} S_{RR}(f)\, df}
+$$
+
+Where $S_{RR}(f)$ is the power spectral density of the RR interval series.
+
+A resting LF/HF ratio of **0.5–2.0** is typical for healthy adults. Ratios above 3.0 indicate sympathetic dominance and are used by the anomaly scorer as a stress or pre-illness indicator. The value is written to Firebase as `hrv_lf_hf`.
+
+---
+
+## Cortisol Estimation
+
+Vital32 does not include a direct cortisol biosensor. Instead, it derives a **cortisol estimate** $C_{\text{est}}$ from the correlation structure of four simultaneously available signals that are individually validated cortisol proxies in the clinical literature:
+
+$$
+C_{\text{est}} = f\!\left(\text{RMSSD},\ \text{GSR}_{\text{baseline}},\ T_{\text{skin}},\ \eta_{\text{sleep}}\right)
+$$
+
+Where:
+- $\text{RMSSD}$ — suppressed HRV correlates with elevated cortisol during the stress response
+- $\text{GSR}_{\text{baseline}}$ — elevated tonic GSR reflects sympathoadrenal activation
+- $T_{\text{skin}}$ — peripheral vasoconstriction under cortisol elevation raises skin surface temperature at wrist sensors
+- $\eta_{\text{sleep}}$ — sleep efficiency score derived from overnight HRV and accelerometer data (lower sleep efficiency is associated with elevated morning cortisol)
+
+The function $f$ is a normalised linear combination with empirically derived weights, output-bounded to $[0, 1]$ where 1 represents maximal estimated cortisol arousal. The value is written to Firebase as `cortisol_est` and is a primary feature in the Isolation Forest immune activation model.
+
+<Note>
+  `cortisol_est` is a physiological proxy, not a serum cortisol measurement. It should be interpreted as a relative indicator of sympathoadrenal activation within a given user's individual baseline, not as a clinical diagnostic value.
+</Note>
+
+---
+
+## Galvanic Skin Response (GSR)
+
+The Grove GSR v1.0 sensor measures **electrodermal activity** by passing a small current through two finger-contact electrodes and measuring skin conductance, which increases with eccrine sweat gland activity under sympathetic nervous system arousal.
+
+The signal is read on **ADC1 channel 7 (GPIO 35)** as a raw 12-bit value (0–4095). It is normalised against the user's baseline conductance (established during the first 60 minutes of wear each day) to produce a unitless `gsr_normalised` value in $[0, 1]$.
+
+**Signal interpretation:**
+
+- **Tonic GSR** (slow baseline drift over minutes) reflects sustained sympathetic arousal — elevated in anxiety, pain, and chronic stress states.
+- **Phasic GSR** (rapid transient spikes of 0.5–3 seconds) reflects discrete sympathetic events — startle responses, acute pain, emotional reactions.
+
+Vital32 computes both tonic (5-minute rolling mean) and phasic (derivative peak detection) components. Phasic spike frequency is used as a feature in the cortisol estimate; tonic level is a direct input to the Isolation Forest.
+
+```cpp
+// GSR baseline calibration (first 60 minutes of wear):
+float gsrBaseline = 0.0;
+int calibrationSamples = 0;
+
+void updateGSRBaseline(int rawADC) {
+  if (calibrationSamples < 3600) {  // 3600 samples at 1 Hz = 60 minutes
+    gsrBaseline = (gsrBaseline * calibrationSamples + rawADC) / (calibrationSamples + 1);
+    calibrationSamples++;
+  }
+}
+
+float normaliseGSR(int rawADC) {
+  return constrain((rawADC - gsrBaseline) / gsrBaseline, 0.0, 1.0);
+}
+```
+
+---
+
+## Bioelectrical Impedance Analysis (AD5933)
+
+The **AD5933** is a single-chip impedance network analyser that generates a programmable sinusoidal excitation signal and measures the complex impedance of the tissue under test. On Vital32, it drives two skin-contact electrodes positioned on the wristband to measure forearm tissue impedance.
+
+### Methodology
+
+The AD5933 sweeps a configurable frequency range (Vital32 uses 50 kHz–100 kHz, 50 steps) and measures the real and imaginary components of the impedance at each frequency. Bioelectrical impedance analysis (BIA) exploits the fact that cell membranes act as capacitors — their reactance changes with frequency in a manner that encodes the ratio of intracellular to extracellular fluid.
+
+The **Cole–Cole model** parameterises the impedance spectrum as:
+
+$$
+Z(f) = R_\infty + \frac{R_0 - R_\infty}{1 + \left(j \frac{f}{f_c}\right)^\alpha}
+$$
+
+Where:
+- $R_0$ — resistance at zero frequency (total body water proxy)
+- $R_\infty$ — resistance at infinite frequency (intracellular fluid proxy)
+- $f_c$ — characteristic frequency of the tissue
+- $\alpha$ — distribution parameter (Cole exponent, typically 0.6–0.8 in healthy tissue)
+
+Vital32 fits the Cole–Cole parameters via least-squares regression across the sweep and extracts the **hydration index** $H = R_0 / R_\infty$. Higher $H$ indicates better cellular hydration. $H$ is written to Firebase as `bia_hydration_score`.
+
+**BIA read procedure:**
+
+```cpp
+void readBIA() {
+  AD5933.setClock(AD5933_CLK_INT);
+  AD5933.setStartFreq(50000);     // 50 kHz
+  AD5933.setIncrFreq(1000);       // 1 kHz step
+  AD5933.setNumIncrements(50);    // 50 points → 50–100 kHz
+  AD5933.setVolPGA(AD5933_VOL_2, AD5933_PGA_X1);
+  AD5933.startFreqSweep();
+
+  int re[50], im[50];
+  for (int i = 0; i < 50; i++) {
+    while (!AD5933.isValueReady());
+    AD5933.getComplexData(&re[i], &im[i]);
+    AD5933.incrementFreq();
+  }
+
+  bioHydrationScore = fitColeModel(re, im, 50);
+}
+```
+
+---
+
+## Isolation Forest Integration
+
+All five primary biometric channels — `hrv_rmssd`, `hrv_lf_hf`, `gsr_normalised`, `cortisol_est`, and `bia_hydration_score` — are concatenated into a feature vector $\mathbf{x} \in \mathbb{R}^5$ and scored by the Isolation Forest model every second:
+
+$$
+\text{anomaly\_score} = 1 - 2^{-\frac{E[h(\mathbf{x})]}{c(n)}}
+$$
+
+Where $E[h(\mathbf{x})]$ is the mean path length of sample $\mathbf{x}$ across all trees in the forest, and $c(n)$ is the expected path length of an unsuccessful search in a binary search tree with $n$ samples (the normalisation constant).
+
+An `anomaly_score` above **0.75** triggers a moderate alert written to Firebase. A score above **0.90** triggers an immediate `writeToFirebase()` and increments the immune activation pre-warning counter. See the [Isolation Forest model page](/ai/isolation-forest) for full architecture documentation.
+
+---
+
+## Firebase State Fields Summary
+
+| Firebase Field | Source Signal | Type | Update Cadence |
+|---|---|---|---|
+| `hrv_rmssd` | MAX30102 PPG → RR series | `float` (ms) | Every 30 s |
+| `hrv_lf_hf` | RR PSD → Welch LF/HF | `float` | Every 30 s |
+| `gsr` | ADC GPIO 35 raw | `int` (0–4095) | Every 30 s |
+| `gsr_normalised` | GSR baseline correction | `float` (0–1) | Every 30 s |
+| `cortisol_est` | $f$(RMSSD, GSR, $T_{\text{skin}}$, $\eta_{\text{sleep}}$) | `float` (0–1) | Every 30 s |
+| `bia_hydration_score` | AD5933 Cole–Cole fit | `float` | Every 30 s |
+| `bio_age` | Fused biomarker model | `float` (years) | Every 30 s |
+| `anomaly_score` | Isolation Forest | `float` (0–1) | Every 1 s (event write if >0.75) |

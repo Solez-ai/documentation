@@ -1,0 +1,249 @@
+---
+title: 'UWB 3-Anchor Trilateration: Precise Indoor Localization'
+sidebarTitle: 'UWB Trilateration'
+description: 'Full mathematical derivation of 3-anchor UWB trilateration, linear system construction, and DWM1000 implementation for sub-10cm indoor positioning.'
+---
+
+
+# UWB 3-Anchor Trilateration: Precise Indoor Localization
+
+HollowRover uses three DW1000-based UWB modules per registered floor to determine its XY position with $\pm 10\,\text{cm}$ accuracy. Each anchor broadcasts two-way ranging (TWR) frames; the rover computes three range measurements $r_A$, $r_B$, $r_C$ and solves the trilateration system analytically. This page derives the complete mathematical framework from first principles.
+
+---
+
+## Anchor Geometry and Range Equations
+
+You deploy three DWM1000 anchors at known, surveyed 2D coordinates on each floor:
+
+$$\mathbf{a} = (a_x,\, a_y), \qquad \mathbf{b} = (b_x,\, b_y), \qquad \mathbf{c} = (c_x,\, c_y)$$
+
+The three anchors must be **non-collinear** — if they are collinear, the system matrix is singular and no unique solution exists. You verify non-collinearity during anchor registration by computing the signed area of the triangle:
+
+$$\mathcal{A} = \frac{1}{2}\left|(b_x - a_x)(c_y - a_y) - (c_x - a_x)(b_y - a_y)\right| > 0$$
+
+If $\mathcal{A} < 0.1\,\text{m}^2$ the registration procedure aborts with `ANCHOR_GEOMETRY_DEGENERATE`.
+
+The rover's unknown position $\mathbf{p} = (x, y)$ satisfies three Euclidean distance constraints — one per anchor:
+
+$$(x - a_x)^2 + (y - a_y)^2 = r_A^2 \tag{1}$$
+
+$$(x - b_x)^2 + (y - b_y)^2 = r_B^2 \tag{2}$$
+
+$$(x - c_x)^2 + (y - c_y)^2 = r_C^2 \tag{3}$$
+
+These three equations define three circles in the plane. The rover position is their common intersection point.
+
+---
+
+## Linearization via Equation Subtraction
+
+Equations (1)–(3) are nonlinear in $x$ and $y$. You linearize them by subtracting equation (1) from equation (2), and equation (1) from equation (3):
+
+**Eq. (2) − Eq. (1):**
+
+$$x^2 - 2b_x x + b_x^2 + y^2 - 2b_y y + b_y^2 - x^2 + 2a_x x - a_x^2 - y^2 + 2a_y y - a_y^2 = r_B^2 - r_A^2$$
+
+The quadratic terms $x^2$ and $y^2$ cancel exactly, yielding:
+
+$$2(b_x - a_x)\,x + 2(b_y - a_y)\,y = r_A^2 - r_B^2 + b_x^2 - a_x^2 + b_y^2 - a_y^2 \tag{4}$$
+
+**Eq. (3) − Eq. (1):**
+
+$$2(c_x - a_x)\,x + 2(c_y - a_y)\,y = r_A^2 - r_C^2 + c_x^2 - a_x^2 + c_y^2 - a_y^2 \tag{5}$$
+
+Equations (4) and (5) are **linear** in $x$ and $y$. You assemble them into the matrix system $A\mathbf{x} = \mathbf{b}$:
+
+$$\begin{pmatrix} 2(b_x - a_x) & 2(b_y - a_y) \\ 2(c_x - a_x) & 2(c_y - a_y) \end{pmatrix} \begin{pmatrix} x \\ y \end{pmatrix} = \begin{pmatrix} r_A^2 - r_B^2 + b_x^2 - a_x^2 + b_y^2 - a_y^2 \\ r_A^2 - r_C^2 + c_x^2 - a_x^2 + c_y^2 - a_y^2 \end{pmatrix}$$
+
+---
+
+## Exact Solution
+
+The system $A\mathbf{x} = \mathbf{b}$ has a unique solution if and only if $\det(A) \neq 0$:
+
+$$\det(A) = 4\left[(b_x - a_x)(c_y - a_y) - (c_x - a_x)(b_y - a_y)\right] = 8\mathcal{A}$$
+
+which equals zero precisely when the anchors are collinear — the same condition checked during registration. For a valid non-collinear placement, the solution is:
+
+$$\mathbf{x} = A^{-1}\mathbf{b}$$
+
+Explicitly via Cramer's rule:
+
+$$x = \frac{1}{\det(A)}\begin{vmatrix} b_{rhs,1} & 2(b_y - a_y) \\ b_{rhs,2} & 2(c_y - a_y) \end{vmatrix}, \qquad y = \frac{1}{\det(A)}\begin{vmatrix} 2(b_x - a_x) & b_{rhs,1} \\ 2(c_x - a_x) & b_{rhs,2} \end{vmatrix}$$
+
+where $b_{rhs,1}$ and $b_{rhs,2}$ are the right-hand side entries of the $\mathbf{b}$ vector above.
+
+<Note>
+The solution $\mathbf{x} = A^{-1}\mathbf{b}$ is a **closed-form analytic solution** — it requires no iteration, no initial guess, and no convergence criterion. This makes it suitable for real-time execution on the ESP32 at the rover's 10 Hz position update rate.
+</Note>
+
+---
+
+## Why Three Anchors Are Necessary
+
+<AccordionGroup>
+  <Accordion title="Two-Anchor Ambiguity — Geometric Analysis">
+
+With only two anchors at $\mathbf{a}$ and $\mathbf{b}$, you have:
+
+$$(x - a_x)^2 + (y - a_y)^2 = r_A^2$$
+$$(x - b_x)^2 + (y - b_y)^2 = r_B^2$$
+
+Two circles in the plane intersect in **zero, one, or two** points. In the generic non-tangent case you obtain two candidate solutions $\mathbf{p}_+$ and $\mathbf{p}_-$ that are mirror reflections across the line $\overline{\mathbf{ab}}$. Mathematically, subtracting equation 1 from equation 2 gives one linear equation — a single line (the radical axis). You cannot determine on which side of that line the rover lies without additional information.
+
+The third circle (anchor $\mathbf{c}$) passes through one of the two intersection points and not the other (generically), uniquely selecting $\mathbf{p}$.
+
+  </Accordion>
+  <Accordion title="Condition Number and Accuracy Degradation">
+
+The accuracy of the solution depends on the condition number $\kappa(A) = \|A\|\,\|A^{-1}\|$. Geometrically, $\kappa(A)$ is minimized when the anchors form an **equilateral triangle** centered on the expected operating region. In that case:
+
+$$\kappa(A) = 1 \quad (\text{ideally conditioned})$$
+
+Elongated anchor geometries (nearly collinear) produce $\kappa(A) \gg 1$, amplifying ranging noise by a factor of $\kappa(A)$. For the DWM1000's ranging noise of $\sigma_r \approx 3\,\text{cm}$, the position error is bounded by:
+
+$$\sigma_{pos} \leq \kappa(A) \cdot \sigma_r$$
+
+This is why the equilateral triangle anchor layout is the recommended deployment configuration.
+
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Python Implementation
+
+The following implementation is used in the HollowRover's companion navigation service:
+
+```python
+
+def trilaterate_3anchor(a, b, c, rA, rB, rC):
+    """
+    Solve 2D UWB trilateration analytically.
+
+    Parameters
+    ----------
+    a, b, c : array-like, shape (2,)
+        Known anchor coordinates [m] as (x, y) pairs.
+    rA, rB, rC : float
+        Measured ranges from rover to anchors A, B, C [m].
+
+    Returns
+    -------
+    np.ndarray, shape (2,)
+        Estimated rover position (x, y) [m].
+
+    Raises
+    ------
+    np.linalg.LinAlgError
+        If anchors are collinear (singular system matrix).
+    """
+    A = 2 * np.array([
+        [b[0] - a[0], b[1] - a[1]],
+        [c[0] - a[0], c[1] - a[1]]
+    ])
+
+    b_vec = np.array([
+        rA**2 - rB**2 + b[0]**2 - a[0]**2 + b[1]**2 - a[1]**2,
+        rA**2 - rC**2 + c[0]**2 - a[0]**2 + c[1]**2 - a[1]**2
+    ])
+
+    return np.linalg.solve(A, b_vec)
+
+
+def anchor_triangle_area(a, b, c):
+    """Verify anchor non-collinearity. Returns signed area [m²]."""
+    return 0.5 * abs(
+        (b[0] - a[0]) * (c[1] - a[1]) - (c[0] - a[0]) * (b[1] - a[1])
+    )
+```
+
+<Tip>
+In production you should wrap `np.linalg.solve` with a try/except for `LinAlgError` and fall back to the last valid position estimate. This handles transient ranging dropouts where one anchor temporarily fails to respond.
+</Tip>
+
+---
+
+## DWM1000 Ranging Accuracy
+
+The DWM1000 uses **Double-Sided Two-Way Ranging (DS-TWR)** to eliminate clock offset errors. The ranging formula cancels the asymmetric reply timing:
+
+$$d = \frac{c}{2} \cdot \frac{T_{round1} \cdot T_{round2} - T_{reply1} \cdot T_{reply2}}{T_{round1} + T_{round2} + T_{reply1} + T_{reply2}}$$
+
+where $c = 3 \times 10^8\,\text{m/s}$, and $T_{round}$, $T_{reply}$ are measured by the initiator and responder respectively. DS-TWR achieves clock-drift cancellation to first order, yielding:
+
+- **Ranging accuracy:** $\pm 10\,\text{cm}$ (1$\sigma$) in typical indoor NLOS-light conditions
+- **Update rate:** 100 TWR exchanges/s per anchor pair at the 6.8 Mbps data rate
+- **Multipath rejection:** UWB sub-nanosecond pulse width ($< 2\,\text{ns}$) means first-path detection cleanly separates from reflections arriving $> 30\,\text{cm}$ later
+
+<AccordionGroup>
+  <Accordion title="NLOS Bias Correction">
+
+In non-line-of-sight (NLOS) conditions, the measured range $r_{measured}$ is systematically **larger** than the true range $r_{true}$ due to the first-detectable-path being a reflected copy:
+
+$$r_{measured} = r_{true} + \epsilon_{NLOS}, \quad \epsilon_{NLOS} \geq 0$$
+
+You detect NLOS conditions from the DWM1000's Channel Impulse Response (CIR) statistics. The **first-path / peak-path power ratio** $\Delta P_{fp}$ is a reliable NLOS indicator:
+
+$$\Delta P_{fp} = P_{peak} - P_{first} \quad [\text{dB}]$$
+
+If $\Delta P_{fp} > 6\,\text{dB}$, the measurement is flagged NLOS and a bias correction of $+0.3\,\text{m}$ is subtracted from $r_{measured}$ before solving the trilateration system. This heuristic correction is derived from empirical measurements in concrete-walled corridors.
+
+  </Accordion>
+  <Accordion title="Kalman Filter for Position Smoothing">
+
+The trilateration solution $\hat{\mathbf{p}}_k$ from each 10 Hz cycle is fused with a constant-velocity kinematic model using a 2D Kalman filter:
+
+**State vector:** $\mathbf{s}_k = [x,\, y,\, \dot{x},\, \dot{y}]^T$
+
+**Process model:**
+
+$$\mathbf{s}_{k+1} = F\mathbf{s}_k + \mathbf{w}_k, \quad \mathbf{w}_k \sim \mathcal{N}(\mathbf{0}, Q)$$
+
+$$F = \begin{pmatrix} 1 & 0 & \Delta t & 0 \\ 0 & 1 & 0 & \Delta t \\ 0 & 0 & 1 & 0 \\ 0 & 0 & 0 & 1 \end{pmatrix}$$
+
+**Observation model:** $\mathbf{z}_k = H\mathbf{s}_k + \mathbf{v}_k$, where $H = [I_{2\times2} \mid 0_{2\times2}]$ and $\mathbf{v}_k \sim \mathcal{N}(\mathbf{0}, R)$ with $R = \sigma_{pos}^2 I$.
+
+The Kalman gain at each step is:
+
+$$K_k = P_k^- H^T (H P_k^- H^T + R)^{-1}$$
+
+This smooths the raw trilateration solution, reducing position jitter from $\pm 10\,\text{cm}$ to $\pm 3\,\text{cm}$ RMS under typical rover velocities of $\leq 0.5\,\text{m/s}$.
+
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Anchor Placement Guidelines
+
+<CardGroup cols={2}>
+  <Card title="Equilateral Triangle" icon="triangle">
+    Place anchors at the vertices of an equilateral triangle with side length $\geq$ 0.6× the diagonal of the room. This minimizes $\kappa(A)$ and provides isotropic position accuracy across the operating zone.
+  </Card>
+  <Card title="Line-of-Sight Clearance" icon="eye">
+    Mount anchors at ceiling height ($\geq 2.5\,\text{m}$) with unobstructed line of sight to the expected user zone. Each anchor must have clear sightlines to at least 80% of the floor area.
+  </Card>
+  <Card title="Minimum Triangle Area" icon="ruler">
+    Ensure $\mathcal{A} \geq 1.5\,\text{m}^2$ for a standard room. Smaller triangles inflate $\kappa(A)$ and degrade accuracy near the triangle edges where the circles are nearly tangent.
+  </Card>
+  <Card title="Z-Axis Separation" icon="layers">
+    UWB signals penetrate floors with $> 30\,\text{dB}$ attenuation at 6.5 GHz. However, barometric pressure provides the primary floor discrimination — UWB resolves XY only after the floor identity is confirmed by the BME688 pressure reading.
+  </Card>
+</CardGroup>
+
+---
+
+## Floor–Position Coordinate Separation
+
+The full 3D localization problem is decoupled into two orthogonal problems:
+
+$$\underbrace{z \text{ (floor)}}_{\text{BME688 barometric}} \perp \underbrace{(x, y) \text{ (position)}}_{\text{DWM1000 UWB trilateration}}$$
+
+1. The BME688 on HollowRover measures atmospheric pressure $P_{current}$ and selects the floor $f^*$ by nearest-neighbor lookup in the registered pressure table (see [Barometric Floor Detection](/math/barometric-floor-detection)).
+2. Once $f^*$ is identified, the rover loads the corresponding anchor coordinate set $\{(a_x, a_y), (b_x, b_y), (c_x, c_y)\}_{f^*}$ from its SLAM configuration file.
+3. The trilateration system above then resolves the XY position within that floor's coordinate frame.
+
+<Warning>
+Never use the UWB ranging distances alone to infer floor identity. Signal strength does not reliably distinguish between floors because concrete attenuation varies by 15–40 dB depending on reinforcement density. Always trust the barometric floor selector for the Z dimension.
+</Warning>

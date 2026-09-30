@@ -1,0 +1,229 @@
+---
+title: 'HollowRover Hardware Assembly and Component Guide'
+sidebarTitle: 'Hardware'
+description: 'Complete component BOM, dual ESP32 wiring schematics, Ackermann drivetrain geometry, and rocker suspension specification for HollowRover.'
+---
+
+
+<Info>
+  This guide covers every physical component in HollowRover's assembly. Read it alongside the wiring schematics before powering any subsystem. Incorrect GPIO assignments on either ESP32 will produce undefined behavior in servo or motor outputs.
+</Info>
+
+---
+
+## Full Component Bill of Materials
+
+| Component | Part | Qty | Role |
+|---|---|---|---|
+| **Main SBC** | D-Robotics RDK X5 (4 GB) | 1 | ROS2 compute, NPU inference |
+| **Drivetrain MCU** | ESP32 WROOM-32 | 1 | Motor control, UWB ranging, BLE RSSI |
+| **Manipulator MCU** | ESP32 WROOM-32 | 1 | Arm servos, dispenser, pump relay |
+| **LiDAR** | STL-19P TOF | 1 | SLAM occupancy grid, 12 m, 5000 Hz |
+| **IMU** | MPU9250 9-axis | 1 | Orientation, dead-reckoning supplement |
+| **Ultrasonic** | HC-SR04 | 4 | Short-range obstacle detection |
+| **Thermal Camera** | MLX90640 32×24 | 1 | Passive person detection, heat mapping |
+| **RGB Camera** | USB 1080p | 1 | DeepFace recognition, visual context |
+| **UWB Modules** | DWM1000 | 3× per floor | Precision localization anchors |
+| **Barometric** | BME688 | 1 | Floor-level disambiguation |
+| **Motor Driver** | L298N (or BTS7960 ×2) | 1 set | Drivetrain H-bridge |
+| **Drive Motors** | Dake DK-37R 315 RPM gear motors | 4 | Locomotion |
+| **Arm Servos** | MG996R | 5 | Joints 1–5 (base through wrist roll) |
+| **Gripper Servo** | MG90S | 1 | Joint 6 end-effector |
+| **Wheels** | 5.6" treaded rubber | 4 | All-surface traction |
+| **Steering Servos** | MG995 | 2 | Ackermann knuckle actuation |
+| **Dispenser Servos** | SG90 micro | 4 | Medication slots A–D |
+| **Pump** | 5 V peristaltic | 1 | Water delivery (100 ml tank) |
+| **Depth Sensor** | TF-Luna ToF | 1 | Chokepoint person detection (0.2–8 m) |
+| **BLE Module** | HC-05 | 1 | RSSI fallback localization |
+| **TFT Display** | 3.5" ILI9488 480×320 SPI | 1 | Manual dispenser UI |
+| **Touch Controller** | XPT2046 | 1 | Resistive touch input for TFT |
+| **Battery** | 5000 mAh 3S LiPo (11.1 V) | 1 | Primary power supply |
+
+---
+
+## Dual ESP32 Architecture
+
+HollowRover uses **two independent ESP32 WROOM-32 controllers** rather than a single MCU. This split is not incidental — it is an architectural requirement driven by timing isolation.
+
+<AccordionGroup>
+  <Accordion title="Why Two Controllers?">
+    **Servo PWM jitter** is the core problem. MG996R and SG90 servos require precise 50 Hz PWM signals with microsecond-level pulse width accuracy. When an ESP32 simultaneously handles SPI communication with DWM1000 UWB modules — which involves high-frequency interrupt-driven transfers and tight ranging time budgets — the FreeRTOS scheduler introduces latency spikes that corrupt servo pulse timing. This produces erratic arm motion and inconsistent medication dispensing.
+
+    By assigning **all time-critical UWB/BLE tasks to the Drivetrain ESP32** and **all PWM-intensive servo and pump tasks to the Manipulator ESP32**, both timing domains operate with full scheduler priority and no cross-interference. Both controllers report state to the RDK X5 over dedicated UART channels at 115200 baud.
+  </Accordion>
+  <Accordion title="Communication to RDK X5">
+    Both ESP32s communicate with the RDK X5 via UART (GPIO1 TX / GPIO3 RX on each controller). The RDK X5 runs dedicated ROS2 bridge nodes — `hollowrover_hardware/drivetrain_serial_node` and `hollowrover_hardware/manipulator_serial_node` — that deserialize incoming state packets and publish to the appropriate ROS2 topics. Command packets flow in the opposite direction, serialized as compact binary frames with a CRC8 checksum.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Drivetrain ESP32 Wiring
+
+The Drivetrain ESP32 owns locomotion, obstacle sensing, UWB ranging, and BLE RSSI scanning.
+
+```cpp
+// ─────────────────────────────────────────────────────────────────────
+// Motor Drivers (BTS7960 ×2 — R_EN / L_EN tied permanently HIGH)
+// ─────────────────────────────────────────────────────────────────────
+GPIO25 (PWM)  -> BTS7960 #1 RPWM          // Left-side forward
+GPIO26 (PWM)  -> BTS7960 #1 LPWM          // Left-side reverse
+GPIO12 (PWM)  -> BTS7960 #2 RPWM          // Right-side forward
+GPIO13 (PWM)  -> BTS7960 #2 LPWM          // Right-side reverse
+
+// ─────────────────────────────────────────────────────────────────────
+// Steering Servos — Ackermann linkage (MG995)
+// ─────────────────────────────────────────────────────────────────────
+GPIO15         -> Left steering servo (MG995)
+GPIO2          -> Right steering servo (MG995)
+
+// ─────────────────────────────────────────────────────────────────────
+// Ultrasonic Sensors (HC-SR04) — one per quadrant
+// ─────────────────────────────────────────────────────────────────────
+GPIO5  TRIG1 / GPIO18 ECHO1  -> Front
+GPIO19 TRIG2 / GPIO21 ECHO2  -> Left
+GPIO22 TRIG3 / GPIO23 ECHO3  -> Right
+GPIO4  TRIG4 / GPIO16 ECHO4  -> Rear
+
+// ─────────────────────────────────────────────────────────────────────
+// UWB Modules (DWM1000) ×3 — shared SPI bus, independent CS lines
+// ─────────────────────────────────────────────────────────────────────
+GPIO32 (SPI SCK)  -> DWM1000 SCK (all three modules)
+GPIO33 (MOSI)     -> DWM1000 MOSI (all three modules)
+GPIO34 (MISO)     -> DWM1000 MISO (all three modules)
+GPIO35 (CS1)      -> DWM1000 #1 CS
+GPIO36 (CS2)      -> DWM1000 #2 CS
+GPIO39 (CS3)      -> DWM1000 #3 CS
+
+// ─────────────────────────────────────────────────────────────────────
+// BLE Module (HC-05) — RSSI fallback localization
+// ─────────────────────────────────────────────────────────────────────
+GPIO9  (TX)  -> HC-05 RX
+GPIO10 (RX)  -> HC-05 TX
+
+// ─────────────────────────────────────────────────────────────────────
+// UART Bridge to RDK X5
+// ─────────────────────────────────────────────────────────────────────
+GPIO1  (TX)  -> RDK X5 UART RX
+GPIO3  (RX)  -> RDK X5 UART TX
+// Baud rate: 115200 | Frame: binary with CRC8 checksum
+```
+
+<Warning>
+  GPIO34, GPIO35, GPIO36, and GPIO39 on the ESP32 are **input-only** pins. They cannot be configured as outputs and have no internal pull-up resistors. Ensure DWM1000 MISO and CS lines respect this constraint — CS lines must be driven from output-capable pins. If wiring deviates from the assignments above, reassign CS to output-capable GPIOs (e.g., GPIO0, GPIO27) and update the firmware SPI initialization accordingly.
+</Warning>
+
+---
+
+## Manipulator ESP32 Wiring
+
+The Manipulator ESP32 owns all servo PWM outputs, the peristaltic pump relay, and the TF-Luna depth sensor.
+
+```cpp
+// ─────────────────────────────────────────────────────────────────────
+// Robotic Arm Servos (MG996R ×5 + MG90S ×1)
+// ─────────────────────────────────────────────────────────────────────
+GPIO13  -> Joint 1: Base rotation    (MG996R)
+GPIO14  -> Joint 2: Shoulder         (MG996R)
+GPIO27  -> Joint 3: Elbow            (MG996R)
+GPIO26  -> Joint 4: Wrist pitch      (MG996R)
+GPIO25  -> Joint 5: Wrist roll       (MG996R)
+GPIO33  -> Joint 6: Gripper          (MG90S)
+
+// ─────────────────────────────────────────────────────────────────────
+// Medication Dispenser (SG90 ×4) — Slots A through D
+// ─────────────────────────────────────────────────────────────────────
+GPIO16  -> Slot A
+GPIO17  -> Slot B
+GPIO18  -> Slot C
+GPIO19  -> Slot D
+
+// ─────────────────────────────────────────────────────────────────────
+// TF-Luna ToF Sensor (UART) — chokepoint person detection
+// ─────────────────────────────────────────────────────────────────────
+GPIO4  (TX)  -> TF-Luna RX
+GPIO5  (RX)  -> TF-Luna TX
+// Default baud: 115200 | Output rate: 100 Hz
+
+// ─────────────────────────────────────────────────────────────────────
+// Peristaltic Water Pump — relay-switched
+// ─────────────────────────────────────────────────────────────────────
+GPIO12  -> Relay IN  (controls 5 V pump)
+
+// ─────────────────────────────────────────────────────────────────────
+// UART Bridge to RDK X5
+// ─────────────────────────────────────────────────────────────────────
+GPIO1  (TX)  -> RDK X5 UART RX
+GPIO3  (RX)  -> RDK X5 UART TX
+// Baud rate: 115200
+```
+
+<Note>
+  All six arm servos and four dispenser servos share a single 5 V regulated rail. At peak torque, five MG996R servos can draw up to 3.5 A combined. Use a dedicated 5 V / 5 A BEC (Battery Eliminator Circuit) buck converter drawing from the 3S LiPo — do not power servos from the ESP32's onboard 3.3 V or 5 V pins.
+</Note>
+
+---
+
+## Drivetrain: Ackermann Steering Geometry
+
+HollowRover's steering system is an **Ackermann linkage** implemented with machined aluminum steering knuckles on the front axle. The Ackermann condition mandates that during a turn, all four wheels trace concentric arcs around a common instantaneous center of rotation. This eliminates lateral tire slip and the resulting dead-reckoning error that accumulates over a navigation session.
+
+The geometric relationship between inner and outer wheel steering angles is:
+
+$$
+\cot(\delta_o) - \cot(\delta_i) = \frac{W}{L}
+$$
+
+Where:
+- $\delta_i$ — inner wheel steering angle
+- $\delta_o$ — outer wheel steering angle
+- $W$ — front axle track width
+- $L$ — wheelbase
+
+The inner wheel **always turns at a greater angle** than the outer wheel ($\delta_i > \delta_o$). The two MG995 steering servos receive independent PWM commands computed from this relationship by the Drivetrain ESP32 firmware whenever a turn radius is commanded over UART from the RDK X5.
+
+**Wheel specification:** 5.6" diameter treaded rubber — the tread pattern is selected for grip on polished floor surfaces (hardwood, tile) while still rolling cleanly over low-pile carpet.
+
+**Motors:** Dake DK-37R 315 RPM gear motors, one per wheel. Drive torque is distributed equally across all four wheels via the BTS7960 H-bridge pairs.
+
+---
+
+## Rocker Suspension
+
+Each side of HollowRover's chassis mounts a **spring-loaded rocker arm** that pivots about a central chassis point. A **differential linking bar** connects the left and right rocker assemblies through the chassis center.
+
+<AccordionGroup>
+  <Accordion title="How the Rocker Differential Works">
+    When one side of the rover encounters an obstacle — a door threshold, a power cable, a rug edge — its rocker deflects upward. The differential bar transmits approximately half that deflection to the opposite rocker, which descends slightly to maintain ground contact. The chassis itself pitches only half the obstacle height rather than the full amount.
+
+    This matters for LiDAR-based SLAM: a chassis that pitches sharply on threshold crossings introduces vertical scan plane variance that corrupts the 2D occupancy grid. The rocker suspension limits chassis pitch to under 3° for most residential floor transitions, keeping the LiDAR scan plane effectively horizontal.
+  </Accordion>
+  <Accordion title="Spring Preload Calibration">
+    The spring preload on each rocker should be set so the rover maintains level chassis attitude on a flat surface with full battery and arm stowed. Add preload in quarter-turn increments and verify with a digital level on the LiDAR mounting plate. Over-preloading stiffens the suspension and defeats the differential coupling effect on low obstacles.
+  </Accordion>
+</AccordionGroup>
+
+---
+
+## Power Architecture
+
+```
+3S LiPo 5000 mAh (11.1 V nominal)
+    │
+    ├─► BTS7960 motor drivers (11.1 V direct)
+    │
+    ├─► 5 V / 5 A BEC ──► Arm + dispenser servos (MG996R ×5, MG90S, SG90 ×4)
+    │
+    ├─► 5 V / 3 A BEC ──► RDK X5 (5 V / 2 A minimum)
+    │                       └─► USB camera, LiDAR (USB powered)
+    │
+    ├─► 5 V / 1 A BEC ──► Drivetrain ESP32
+    │                       └─► HC-05, DWM1000 ×3, HC-SR04 ×4 (3.3 V from ESP32)
+    │
+    └─► 5 V / 1 A BEC ──► Manipulator ESP32
+                            └─► TF-Luna, pump relay, TFT display
+```
+
+<Warning>
+  Never power the RDK X5 and the motor drivers from the same unregulated LiPo tap. Motor inrush current causes voltage sag that can crash the RDK X5. Always interpose a dedicated regulated BEC between the LiPo and the RDK X5 power input.
+</Warning>
