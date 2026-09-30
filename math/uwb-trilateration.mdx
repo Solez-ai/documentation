@@ -4,9 +4,6 @@ sidebarTitle: 'UWB Trilateration'
 description: 'Full mathematical derivation of 3-anchor UWB trilateration, linear system construction, and DWM1000 implementation for sub-10cm indoor positioning.'
 ---
 
-
-# UWB 3-Anchor Trilateration: Precise Indoor Localization
-
 HollowRover uses three DW1000-based UWB modules per registered floor to determine its XY position with $\pm 10\,\text{cm}$ accuracy. Each anchor broadcasts two-way ranging (TWR) frames; the rover computes three range measurements $r_A$, $r_B$, $r_C$ and solves the trilateration system analytically. This page derives the complete mathematical framework from first principles.
 
 ---

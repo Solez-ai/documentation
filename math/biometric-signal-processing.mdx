@@ -1,11 +1,8 @@
 ---
-title: 'Biometric Signal Processing: HRV, GSR, and Cortisol Estimation'
+title: 'Biometric Signal Processing: HRV, GSR, BIA, and Cortisol'
 sidebarTitle: 'Signal Processing'
 description: 'Derivations for HRV, RMSSD, LF/HF spectral ratio, GSR electrodermal activity, bioelectrical impedance, and cortisol proxy estimation on Vital32.'
 ---
-
-
-# Biometric Signal Processing: HRV, GSR, and Cortisol Estimation
 
 Vital32 acquires four primary biometric streams in continuous operation: photoplethysmography (PPG) from the MAX30102, galvanic skin response (GSR) from a two-electrode circuit on GPIO35, bioelectrical impedance from the AD5933 network analyzer, and skin surface temperature from the MLX90614 IR thermometer. You pass all four streams through a rigorous signal validation and feature-extraction pipeline before they enter any inference model. This page derives the core mathematical transforms applied to each stream.
 

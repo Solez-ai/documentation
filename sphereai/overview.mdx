@@ -1,9 +1,10 @@
 ---
 title: 'SphereAI: Trimodal Emotional Intelligence for LifeSphere'
 sidebarTitle: 'Overview'
-description: "SphereAI is LifeSphere affective computing layer — fusing language, voice, and biological signals to model emotional and cognitive states in real time."
+description: "SphereAI is LifeSphere's affective computing layer, fusing language, voice, and biological signals to model emotional and cognitive states in real time."
 ---
 
+SphereAI is the emotional intelligence subsystem of LifeSphere. It runs a **TriAgent architecture** — three concurrent agents analyzing language, voice acoustics, and biological signals — fused by a prior-state-conditioned **MetaClassifier** that writes a live emotional state to Firebase every 15 minutes.
 
 <Info>
   SphereAI operates as a continuously active affective layer on the HollowRover's RDK X5 processor. It does **not** require continuous cloud connectivity — wake-word detection runs entirely on the embedded ESP32-S3.
@@ -15,7 +16,7 @@ SphereAI is the emotional intelligence engine of the LifeSphere ecosystem. It im
 
 This design reflects a core insight in affective computing: no single modality is sufficient. Language can be deliberately controlled. Vocal acoustics betray stress even when words do not. Biological signals reveal physiological load regardless of whether the person speaks at all. The TriAgent architecture exploits all three channels simultaneously and weighs them intelligently based on what the current emotional context suggests will be most reliable.
 
-```
+```text
 ┌─────────────────────────────────────────────────────────┐
 │                     SphereAI Core                       │
 │                                                         │
@@ -140,7 +141,7 @@ SphereAI does not stream audio continuously to cloud services or consume the RDK
 
 On wake-word detection, the ESP32-S3 signals the RDK X5 via **UART at 115,200 baud**, and the RDK X5 activates the full Whisper STT pipeline and TriAgent inference cycle. This architecture means the privacy-sensitive audio processing occurs only when explicitly triggered and remains on-device.
 
-```
+```text
 ESP32-S3 (always on, low power)
     │  ESP-SR wake-word model
     │  "Hey Sphere" detected

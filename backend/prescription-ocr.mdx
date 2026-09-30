@@ -1,9 +1,10 @@
 ---
-title: 'Prescription OCR Pipeline: Automated Medication Schedule Setup'
+title: 'Prescription OCR: Automated Medication Schedule Ingestion'
 sidebarTitle: 'Prescription OCR'
-description: "One-time prescription photograph workflow that converts a doctor's handwritten or printed prescription into a complete, confirmed medication schedule via OCR and LLM extraction."
+description: "Photograph a prescription to populate Firebase med_schedule via OpenCV, Tesseract, and LLM extraction — confirm once in the app, rover handles delivery."
 ---
 
+The LifeSphere prescription OCR pipeline converts a photograph of any handwritten or printed prescription into a structured, confirmed medication schedule stored at `/lifesphere/hollowcore/med_schedule` in Firebase — ready for the HollowRover to act on immediately. A second input path via the ILI9488 touchscreen on HollowRover writes to the same path at `/lifesphere/hollowcore/dispenser_manual` for on-site manual override.
 
 ## The Problem with Manual Medication Entry
 

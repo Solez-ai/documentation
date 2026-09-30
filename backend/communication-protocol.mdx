@@ -1,7 +1,7 @@
 ---
-title: 'LifeSphere Inter-Subsystem Communication Protocol'
+title: 'LifeSphere Four-Channel Communication Protocol Stack'
 sidebarTitle: 'Communication Protocol'
-description: 'The four-channel communication architecture that binds all five LifeSphere subsystems — from 150ms cloud state sharing to sub-10ms physical actuator control.'
+description: "Four-channel stack binding all five LifeSphere subsystems: Firebase state sharing, local MQTT appliance control, UART motor drive, and GSM fallback."
 ---
 
 
@@ -94,6 +94,42 @@ The result is a communication model with no single point of failure. If the clou
     | `fan` | Fan relay | `true` / `false` |
     | `ac` | Air conditioner | `{"target_temp": <float>}` |
     | `door_lock` | Magnetic lock | `true` (locked) / `false` (unlocked) |
+
+    ---
+
+    **Secondary topic:** `sphereai/command`
+
+    SphereAI subscribes to the `sphereai/command` topic to receive audio and interaction directives from other subsystems — such as HollowCore triggering a medication reminder or an adhkar playback sequence.
+
+    **SphereAI command payload schema:**
+
+    ```json
+    {
+      "action": "play_audio",
+      "payload": "medication_reminder"
+    }
+    ```
+
+    ```python
+    # Trigger a SphereAI audio command from HollowCore
+    client.publish(
+        "sphereai/command",
+        '{"action": "play_audio", "payload": "medication_reminder"}'
+    )
+
+    # Trigger adhkar playback when stress_level > 0.7
+    client.publish(
+        "sphereai/command",
+        '{"action": "play_audio", "payload": "adhkar_calm"}'
+    )
+    ```
+
+    | Field | Type | Description |
+    |---|---|---|
+    | `action` | `string` | Command type: `"play_audio"`, `"speak"`, `"stop"` |
+    | `payload` | `string` | Audio asset identifier or TTS text string |
+
+    ---
 
     MQTT traffic never leaves the local network. The Mosquitto broker binds to `127.0.0.1` and the local subnet interface only. There is no port forwarding, no external broker, and no TLS overhead required — the local network segment is the trust boundary.
   </Tab>

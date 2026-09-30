@@ -1,12 +1,13 @@
 ---
-title: 'HollowRover Hardware Assembly and Component Guide'
+title: 'HollowRover Hardware: Full BOM, Wiring, and Drivetrain'
 sidebarTitle: 'Hardware'
 description: 'Complete component BOM, dual ESP32 wiring schematics, Ackermann drivetrain geometry, and rocker suspension specification for HollowRover.'
 ---
 
+HollowRover's physical assembly spans two ESP32 microcontrollers, a D-Robotics RDK X5 compute board, a full sensor suite, and a custom Ackermann drivetrain — this page documents every component, its wiring assignment, and the mechanical rationale behind each design decision.
 
 <Info>
-  This guide covers every physical component in HollowRover's assembly. Read it alongside the wiring schematics before powering any subsystem. Incorrect GPIO assignments on either ESP32 will produce undefined behavior in servo or motor outputs.
+  Read this guide alongside the wiring schematics before powering any subsystem. Incorrect GPIO assignments on either ESP32 will produce undefined behavior in servo or motor outputs.
 </Info>
 
 ---
@@ -207,7 +208,7 @@ Each side of HollowRover's chassis mounts a **spring-loaded rocker arm** that pi
 
 ## Power Architecture
 
-```
+```text
 3S LiPo 5000 mAh (11.1 V nominal)
     │
     ├─► BTS7960 motor drivers (11.1 V direct)

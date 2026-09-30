@@ -1,9 +1,10 @@
 ---
-title: 'Pre-Seizure LSTM: 30-Minute Predictive Detection'
+title: 'Pre-Seizure LSTM: Wearable 30-Minute Early Detection'
 sidebarTitle: 'Seizure LSTM'
-description: "Architecture, training datasets, and deployment of the LifeSphere pre-ictal LSTM model, estimating seizure probability 30 minutes before onset from wearable biomarkers."
+description: "LifeSphere pre-ictal LSTM estimates seizure probability 30 minutes before onset using CHB-MIT-trained wearable biomarkers, running on the Vital32 ESP32."
 ---
 
+The Pre-Seizure LSTM learns temporal patterns in HRV, accelerometer, skin temperature, GSR, and SpO2 signals to estimate seizure probability 30 minutes before onset. It runs on the Vital32 ESP32 at every 5-second firmware tick via TFLite Micro, enabling the HollowRover to pre-position protective equipment before any ictal event begins.
 
 <Info>
   The Pre-Seizure LSTM estimates **seizure probability 30 minutes before onset** by learning temporal patterns in HRV, accelerometer, skin temperature, GSR, and SpO2 signals. It runs on the Vital32 ESP32 at every 5-second firmware tick via TFLite Micro.

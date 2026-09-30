@@ -1,7 +1,7 @@
 ---
-title: "Vital32 Fall Detection Algorithm and Calibration"
+title: "Vital32 Fall Detection: Algorithm and Calibration Guide"
 sidebarTitle: "Fall Detection"
-description: "Three-stage freefall, impact, and immobility fall detection algorithm running on the MPU6050 at 50 Hz, with physical threshold derivation and calibration procedure."
+description: "Three-stage freefall, impact, and immobility algorithm on the MPU6050 at 50 Hz. Includes threshold derivation, C++ implementation, and calibration steps."
 ---
 
 Fall detection in Vital32 runs as a three-stage sequential state machine on the MPU6050 inertial measurement unit, executing every 20 ms (50 Hz) within the main firmware loop. The algorithm was designed to achieve a high positive predictive value for genuine falls while rejecting vigorous activities such as running, jumping, or rapid arm movements that produce large acceleration transients without the characteristic freefall-to-impact signature.
@@ -82,12 +82,12 @@ When `detectFall()` returns `true`, the firmware immediately executes an out-of-
 ```cpp
 if (detectFall(ax, ay, az)) {
   fallTimestamp = millis();
-  Firebase.setBool(fbdo, "/vital32/" + deviceId + "/fall_detected", true);
-  Firebase.setInt(fbdo,  "/vital32/" + deviceId + "/fall_timestamp", fallTimestamp);
+  Firebase.setBool(fbdo, "/lifesphere/vital32/" + deviceId + "/fall_detected", true);
+  Firebase.setInt(fbdo,  "/lifesphere/vital32/" + deviceId + "/fall_timestamp", fallTimestamp);
 }
 ```
 
-The `fall_detected` field is the primary trigger for **HollowRover emergency dispatch**. HollowRover's Firebase listener fires on any write to `/vital32/*/fall_detected` where the value transitions to `true`. HollowRover immediately aborts its current task, computes a navigation path to the user's last known UWB-localised position, and enters protective proximity mode within an estimated 45–90 seconds depending on distance and floor layout.
+The `fall_detected` field is the primary trigger for **HollowRover emergency dispatch**. HollowRover's Firebase listener fires on any write to `/lifesphere/vital32/*/fall_detected` where the value transitions to `true`. HollowRover immediately aborts its current task, computes a navigation path to the user's last known UWB-localised position, and enters protective proximity mode within an estimated 45–90 seconds depending on distance and floor layout.
 
 `fall_detected` is automatically reset to `false` after 60 seconds by a cloud function, or immediately if the user presses the Vital32 wristband button to cancel the alert.
 

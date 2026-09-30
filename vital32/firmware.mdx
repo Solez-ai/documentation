@@ -80,7 +80,7 @@ Biological age is a composite derived from multiple slowly-evolving signals (HRV
 
 ## Firebase Write Schema
 
-Each 30-second write (or event-triggered write) commits the following JSON object to `/vital32/{deviceId}/latest` in the Firebase Realtime Database:
+Each 30-second write (or event-triggered write) commits the following JSON object to `/lifesphere/vital32/{deviceId}/latest` in the Firebase Realtime Database:
 
 ```json
 {
@@ -99,7 +99,7 @@ Each 30-second write (or event-triggered write) commits the following JSON objec
   "bia_hydration_score": 0.68,
   "bio_age": 41.2,
   "anomaly_score": 0.13,
-  "seizure_risk": 0.04,
+  "seizure_prob": 0.04,
   "fall_detected": false,
   "accel_magnitude": 0.98,
   "wifi_rssi": -62
@@ -107,6 +107,45 @@ Each 30-second write (or event-triggered write) commits the following JSON objec
 ```
 
 Fields prefixed with `_est` or `_score` are model outputs, not raw sensor readings. Downstream subsystems (HollowRover, SphereAI, HollowCore) subscribe to this node and react to state changes without polling.
+
+### Python Firebase Listener
+
+Any backend service or integration can subscribe to Vital32 state changes using the `on_vital32_change` callback. The listener fires whenever any field under `/lifesphere/vital32/{deviceId}/latest` is written:
+
+```python
+import firebase_admin
+from firebase_admin import credentials, db
+
+cred = credentials.Certificate("serviceAccountKey.json")
+firebase_admin.initialize_app(cred, {
+    "databaseURL": "https://<your-project>.firebaseio.com"
+})
+
+def on_vital32_change(event):
+    """
+    Fires on every Vital32 state write.
+    event.data  — dict of updated fields (or None on delete)
+    event.path  — relative path within /lifesphere/vital32/{deviceId}/latest
+    """
+    data = event.data
+    if data is None:
+        return
+
+    anomaly_score = data.get("anomaly_score", 0)
+    fall_detected = data.get("fall_detected", False)
+    seizure_prob  = data.get("seizure_prob", 0)
+
+    if fall_detected:
+        dispatch_hollow_rover(data)
+    if anomaly_score > 0.75:
+        trigger_immune_alert(data)
+    if seizure_prob > 0.5:
+        trigger_seizure_protocol(data)
+
+device_id = "<deviceId>"
+ref = db.reference(f"/lifesphere/vital32/{device_id}/latest")
+ref.listen(on_vital32_change)
+```
 
 ---
 
@@ -146,11 +185,11 @@ Vital32 supports over-the-air firmware updates via the Arduino OTA library. The 
 ArduinoOTA.onStart([]() {
   allSensorsSuspend();
   display.showUpdateScreen();
-  Firebase.setString(fbdo, "/vital32/" + deviceId + "/status", "updating");
+  Firebase.setString(fbdo, "/lifesphere/vital32/" + deviceId + "/status", "updating");
 });
 
 ArduinoOTA.onEnd([]() {
-  Firebase.setString(fbdo, "/vital32/" + deviceId + "/status", "online");
+  Firebase.setString(fbdo, "/lifesphere/vital32/" + deviceId + "/status", "online");
   ESP.restart();
 });
 ```

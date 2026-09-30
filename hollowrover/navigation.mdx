@@ -4,12 +4,11 @@ sidebarTitle: 'Navigation'
 description: 'ROS2 package architecture, SLAM Toolbox lifelong mapping, 3-anchor UWB trilateration, barometric floor detection, and BLE RSSI fallback for HollowRover.'
 ---
 
+HollowRover's navigation system solves a problem that most indoor robots sidestep: **reliable, sub-room-level localization in a multi-floor environment without external infrastructure dependencies at runtime**. The three-tier stack — UWB trilateration → barometric floor detection → BLE RSSI fallback — ensures the rover can always locate itself and its care recipient, degrading gracefully through each tier rather than failing hard.
 
 <Info>
   HollowRover's navigation stack is built on ROS2 Humble with Nav2 and SLAM Toolbox. Familiarity with ROS2 concepts — nodes, topics, transforms, and the `tf2` tree — is assumed throughout this page.
 </Info>
-
-HollowRover's navigation system solves a problem that most indoor robots sidestep: **reliable, sub-room-level localization in a multi-floor environment without external infrastructure dependencies at runtime**. The three-tier stack — UWB trilateration → barometric floor detection → BLE RSSI fallback — ensures the rover can always locate itself and its care recipient, degrading gracefully through each tier rather than failing hard.
 
 ---
 
@@ -17,7 +16,7 @@ HollowRover's navigation system solves a problem that most indoor robots sideste
 
 The full HollowRover software stack lives in a single ROS2 workspace. Each package has a tightly scoped responsibility; inter-package communication happens exclusively over typed ROS2 topics and action servers.
 
-```
+```text
 hollowrover_ws/
 ├── src/
 │   ├── hollowrover_bringup/        ← Launch files for full system startup
@@ -50,7 +49,9 @@ hollowrover_ws/
 │   │
 │   ├── hollowrover_firebase/       ← Firebase state subscriber
 │   │     hollowrover_firebase/
-│   │       firebase_bridge.py      ← Listens to /lifesphere/... paths
+│   │       firebase_bridge.py      ← Subscribes to /lifesphere/vital32,
+│   │                                  /lifesphere/entryguard,
+│   │                                  /lifesphere/hollowcore/med_schedule
 │   │
 │   └── hollowrover_arm/            ← 6-DOF arm control node
 │         hollowrover_arm/
@@ -274,3 +275,32 @@ After manual relocation, the rover re-identifies its floor via barometric sensin
   }
 }
 ```
+
+### Rover Status Schema (Firebase)
+
+HollowRover publishes its own operational state to `/lifesphere/hollowrover` after every navigation or protocol event. Other subsystems — HollowCore, SphereAI — read this path to coordinate responses.
+
+```json
+// /lifesphere/hollowrover
+{
+  "status": "navigating",
+  "current_floor": "floor_2",
+  "position": { "x": 2.4, "y": 1.8 },
+  "active_protocol": "medication_delivery",
+  "localization_mode": "uwb",
+  "battery_pct": 78,
+  "arm_pose": "stow",
+  "last_updated": "2025-01-16T07:00:38Z"
+}
+```
+
+| Field | Type | Description |
+|---|---|---|
+| `status` | string | `idle`, `navigating`, `protocol_active`, `fault` |
+| `current_floor` | string | Floor ID matching `/lifesphere/floors/{floorId}` |
+| `position` | object | Last resolved `(x, y)` in floor coordinate frame (metres) |
+| `active_protocol` | string | Name of the running protocol node, or `null` if idle |
+| `localization_mode` | string | `uwb`, `ble_rssi`, or `dead_reckoning` |
+| `battery_pct` | integer | Estimated remaining battery percentage |
+| `arm_pose` | string | Current named pose from the arm pose library |
+| `last_updated` | string | ISO 8601 UTC timestamp of last write |

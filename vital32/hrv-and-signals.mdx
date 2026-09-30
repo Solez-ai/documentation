@@ -178,6 +178,39 @@ Where $E[h(\mathbf{x})]$ is the mean path length of sample $\mathbf{x}$ across a
 
 An `anomaly_score` above **0.75** triggers a moderate alert written to Firebase. A score above **0.90** triggers an immediate `writeToFirebase()` and increments the immune activation pre-warning counter. See the [Isolation Forest model page](/ai/isolation-forest) for full architecture documentation.
 
+### `get_anomaly_score` API
+
+The Isolation Forest scorer is exposed as a standalone callable for testing and offline batch analysis:
+
+```python
+def get_anomaly_score(model, sample) -> float:
+    """
+    Score a single biometric sample against the fitted Isolation Forest model.
+
+    Parameters
+    ----------
+    model  : sklearn.ensemble.IsolationForest
+        A fitted IsolationForest instance calibrated on the user's baseline data.
+    sample : array-like of shape (5,)
+        Feature vector in the order:
+        [hrv_rmssd, hrv_lf_hf, gsr_normalised, cortisol_est, bia_hydration_score]
+
+    Returns
+    -------
+    float
+        Normalised anomaly score in [0, 1].
+        Scores above 0.75 indicate a moderate biometric deviation.
+        Scores above 0.90 trigger an immediate Firebase alert write.
+    """
+    import numpy as np
+    x = np.array(sample).reshape(1, -1)
+    # IsolationForest.score_samples returns negative anomaly scores;
+    # convert to a 0–1 scale where 1 = most anomalous.
+    raw = model.score_samples(x)[0]          # range: roughly -0.5 to 0.5
+    normalised = 1.0 - (raw - (-0.5)) / 1.0  # map to [0, 1]
+    return float(np.clip(normalised, 0.0, 1.0))
+```
+
 ---
 
 ## Firebase State Fields Summary

@@ -1,5 +1,5 @@
 ---
-title: 'Firebase Realtime Database: LifeSphere Biological State Backbone'
+title: 'Firebase Realtime Database: LifeSphere Shared State Backbone'
 sidebarTitle: 'Firebase Architecture'
 description: 'How Firebase Realtime Database serves as the central nervous system binding all five LifeSphere subsystems through a shared, live biological state tree.'
 ---
@@ -128,9 +128,11 @@ The Vital32 wearable writes sensor data to Firebase using the `FirebaseESP32` li
 FirebaseData fbdo;
 
 void writeToFirebase(SensorData data) {
-  Firebase.setFloat(fbdo, "/lifesphere/vital32/heart_rate", data.hr);
-  Firebase.setFloat(fbdo, "/lifesphere/vital32/spo2",       data.spo2);
+  Firebase.setFloat(fbdo, "/lifesphere/vital32/heart_rate",    data.hr);
+  Firebase.setFloat(fbdo, "/lifesphere/vital32/spo2",          data.spo2);
   Firebase.setBool(fbdo,  "/lifesphere/vital32/fall_detected", data.fall);
+  Firebase.setFloat(fbdo, "/lifesphere/vital32/anomaly_score", data.anomaly_score);
+  Firebase.setFloat(fbdo, "/lifesphere/vital32/seizure_prob",  data.seizure_prob);
 }
 ```
 

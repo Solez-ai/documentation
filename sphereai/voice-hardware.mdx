@@ -4,12 +4,13 @@ sidebarTitle: 'Voice Hardware'
 description: 'Complete voice I/O chain for SphereAI: INMP441 I2S microphone, MAX98357A Class D amplifier, ESP32-S3 wake-word engine, and UART handoff to RDK X5.'
 ---
 
+SphereAI's voice subsystem is a fully digital audio pipeline: an INMP441 I2S microphone feeds raw PCM to an ESP32-S3 running always-on wake-word detection, which triggers the RDK X5 over UART to begin Whisper STT transcription and TriAgent inference. Audio output is handled by a MAX98357A Class D amplifier. This page covers every hardware component, wiring interface, and firmware interaction in the voice chain.
 
 ## Voice I/O Architecture
 
 SphereAI's voice hardware is a fully digital signal chain. No analog audio crosses the system boundary — audio is captured, processed, and reproduced entirely in the digital domain from microphone diaphragm to speaker cone. This design decision was made for three reasons: immunity to board-level electromagnetic interference, elimination of analog-to-digital conversion as a noise source, and direct pipeline compatibility with Whisper STT's 16 kHz PCM input format.
 
-```
+```text
 ┌─────────────────────────────────────────────────────────────────┐
 │                     Voice I/O Signal Chain                      │
 │                                                                 │
@@ -123,7 +124,7 @@ The ESP32-S3 is the always-on acoustic sentinel of SphereAI. It runs **ESP-SR**,
 
 ### ESP-SR Wake-Word Pipeline
 
-```
+```text
 INMP441 ──I2S──► ESP32-S3 I2S Peripheral
                        │
                        ▼
@@ -154,7 +155,7 @@ ESP-SR's WakeNet model runs on the ESP32-S3's vector processor extensions. The m
 
 On wake-word detection, the ESP32-S3 transmits a single-byte event code to the RDK X5 over UART:
 
-```
+```text
 Baud rate:    115200
 Data bits:    8
 Parity:       None

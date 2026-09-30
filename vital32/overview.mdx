@@ -12,7 +12,7 @@ The design philosophy is: **measure everything the body expresses silently, then
 
 ## Sensor Array
 
-Vital32 mounts twelve discrete sensors on a compact PCB wristband form factor, communicating with the ESP32 over a shared I²C bus (GPIO 21/22) plus one ADC channel. Each sensor was selected for low power draw, I²C compatibility, and clinical-grade signal quality at consumer price points.
+Vital32 mounts eight sensing modules on a compact PCB wristband form factor, communicating with the ESP32 over a shared I²C bus (GPIO 21/22) plus one ADC channel. Across these modules the device exposes fourteen individual sensing channels — six inertial axes, two optical channels, four environmental channels, plus electrodermal and impedance channels. Each module was selected for low power draw, I²C compatibility, and clinical-grade signal quality at consumer price points.
 
 | Sensor | Modality | I²C Address | What It Measures |
 |---|---|---|---|
@@ -55,7 +55,7 @@ Every 30 seconds, Vital32 computes a biological age estimate from the fused biom
 
 ## Firebase Integration
 
-Vital32 writes to the shared Firebase Realtime Database every 30 seconds at minimum, or immediately on event triggers (fall detected, anomaly score above threshold, pre-seizure flag). The Firebase node `/vital32` acts as the **single source of biological truth** for the entire LifeSphere ecosystem.
+Vital32 writes to the shared Firebase Realtime Database every 30 seconds at minimum, or immediately on event triggers (fall detected, anomaly score above threshold, pre-seizure flag). The Firebase node `/lifesphere/vital32` acts as the **single source of biological truth** for the entire LifeSphere ecosystem.
 
 Every other subsystem — HollowRover, SphereAI, HollowCore, and EntryGuard — subscribes to this state object and reacts without any additional messaging layer. Transmission latency from sensor sample to Firebase commit is consistently **under 150 ms** on a stable 2.4 GHz Wi-Fi connection.
 

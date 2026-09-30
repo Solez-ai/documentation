@@ -4,6 +4,7 @@ sidebarTitle: 'TriAgent Fusion'
 description: "Technical reference for SphereAI TriAgent architecture: concurrent Language, Voice, and Biology agents fused by a prior-state-conditioned MetaClassifier."
 ---
 
+This page provides the complete technical reference for SphereAI's TriAgent fusion system — detailing how the Language, Voice, and Biology agents operate concurrently, how the MetaClassifier selects weights from the prior emotional state, and the Firebase schema produced after each inference cycle.
 
 <Info>
   Inference runs on a **15-minute medium cycle**. Acute threshold alerts (e.g. GSR spike above 20 µS with HRV collapse) are handled outside the fusion pipeline by direct Biology Agent rules to minimize latency.
@@ -13,7 +14,7 @@ description: "Technical reference for SphereAI TriAgent architecture: concurrent
 
 SphereAI's TriAgent architecture decomposes affective state inference into three independent analytical pipelines that execute **concurrently** on the RDK X5. Each agent produces a probability distribution over the set of recognized emotional states. The MetaClassifier then fuses those distributions using weights dynamically selected by the prior emotional state.
 
-```
+```text
                      ┌──────────────────────────────────────────────────┐
                      │              TriAgent Parallel Execution          │
                      │                                                  │
@@ -277,7 +278,7 @@ Fusion results are written to `/lifesphere/sphereai` after each inference cycle:
 
 ## Inference Cycle Timing
 
-```
+```text
 T+0:00  Wake-word detected → UART trigger to RDK X5
 T+0:01  Audio buffer captured (10s window)
 T+0:03  Whisper STT transcription complete

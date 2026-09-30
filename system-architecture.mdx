@@ -1,5 +1,5 @@
 ---
-title: 'LifeSphere System Architecture and Data Flow'
+title: 'LifeSphere System Architecture: Data Flow and Design'
 sidebarTitle: 'Architecture'
 description: 'Deep-dive into the shared biological state schema, publish-subscribe data flow, multi-timescale inference cycles, and fault-tolerance design of LifeSphere.'
 ---
@@ -55,7 +55,15 @@ The entire ecosystem's understanding of the resident is encoded in a single Fire
     },
     "hollowcore": {
       "ac_temp": 24,
-      "fan": false
+      "fan": false,
+      "med_schedule": {
+        "slot_0": { "name": "Metformin 500mg", "time": "08:00", "dispensed": false },
+        "slot_1": { "name": "Amlodipine 5mg",  "time": "20:00", "dispensed": false }
+      },
+      "dispenser_manual": {
+        "slot": 0,
+        "trigger": false
+      }
     },
     "entryguard": {
       "mode": "passive",
@@ -90,6 +98,8 @@ The entire ecosystem's understanding of the resident is encoded in a single Fire
 | `battery` | hollowrover | int | Robot battery percentage |
 | `ac_temp` | hollowcore | int | Current AC setpoint in °C |
 | `fan` | hollowcore | bool | Fan relay state |
+| `med_schedule` | hollowcore | object | Keyed medication schedule; each slot carries `name`, `time` (HH:MM), and `dispensed` flag |
+| `dispenser_manual` | hollowcore | object | Manual dispenser trigger: `slot` (int, carousel position) and `trigger` (bool, set true to dispense) |
 | `mode` | entryguard | string | Security mode: `passive`, `alert`, `lockdown` |
 | `intruder_detected` | entryguard | bool | True when face recognition returns no authorized match |
 
@@ -120,7 +130,14 @@ LifeSphere operates a two-channel communication model: a cloud path for cross-su
 
     **Traffic carried:** High-frequency sensor samples (raw PPG waveform, raw accelerometer data) that are too voluminous for Firebase and too time-sensitive for round-trip cloud latency
 
-    **How it works:** Vital32 publishes raw sensor streams to the local MQTT broker at up to 100 Hz. HollowRover's ROS2 navigation stack subscribes to fall and seizure events from the MQTT broker to enable sub-second physical response initiation, independent of Firebase availability.
+    **Published topics:**
+
+    | Topic | Publisher | Payload |
+    |---|---|---|
+    | `lifesphere/hollowcore/command` | HollowCore Pi | JSON appliance relay command — `{ "relay": 2, "state": true }` |
+    | `sphereai/command` | SphereAI service | JSON audio command — `{ "action": "speak", "text": "..." }` |
+
+    **How it works:** Vital32 publishes raw sensor streams to the local MQTT broker at up to 100 Hz. HollowRover's ROS2 navigation stack subscribes to fall and seizure events from the MQTT broker to enable sub-second physical response initiation, independent of Firebase availability. HollowCore subscribes to `lifesphere/hollowcore/command` to actuate appliance relays without a cloud round-trip. SphereAI subscribes to `sphereai/command` to trigger audio output on the local speaker hardware.
 
     **Failure mode:** If the local MQTT broker (HollowCore Pi) becomes unreachable, Vital32 falls back to Firebase-only operation. Raw waveform logging continues to the SD card.
   </Tab>

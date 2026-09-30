@@ -116,9 +116,11 @@ This guide takes you from a fresh Firebase project to a fully operational LifeSp
     FirebaseData fbdo;
 
     void writeToFirebase(SensorData data) {
-      Firebase.setFloat(fbdo, "/lifesphere/vital32/heart_rate", data.hr);
-      Firebase.setFloat(fbdo, "/lifesphere/vital32/spo2",       data.spo2);
+      Firebase.setFloat(fbdo, "/lifesphere/vital32/heart_rate",   data.hr);
+      Firebase.setFloat(fbdo, "/lifesphere/vital32/spo2",         data.spo2);
       Firebase.setBool(fbdo,  "/lifesphere/vital32/fall_detected", data.fall);
+      Firebase.setFloat(fbdo, "/lifesphere/vital32/anomaly_score", data.anomalyScore);
+      Firebase.setFloat(fbdo, "/lifesphere/vital32/seizure_prob",  data.seizureProb);
     }
     ```
 

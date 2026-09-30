@@ -4,12 +4,11 @@ sidebarTitle: 'Medication Dispenser'
 description: 'Four-slot autonomous dispensing system with prescription OCR onboarding, Firebase schedule sync, touch UI, water delivery, and adherence entropy modeling.'
 ---
 
+HollowRover's dispensing system is a **four-slot autonomous delivery unit** integrated with the LifeSphere Firebase backend. Medication schedules are populated once through a prescription OCR pipeline in the mobile app, validated by the user, and thereafter executed by the rover without further input. A resistive touchscreen interface on the rover chassis provides a fully offline manual fallback.
 
 <Info>
   The medication dispensing system combines autonomous schedule execution with a physical manual fallback, ensuring that a connectivity loss or software fault never leaves a care recipient without access to their medication.
 </Info>
-
-HollowRover's dispensing system is a **four-slot autonomous delivery unit** integrated with the LifeSphere Firebase backend. Medication schedules are populated once through a prescription OCR pipeline in the mobile app, validated by the user, and thereafter executed by the rover without further input. A resistive touchscreen interface on the rover chassis provides a fully offline manual fallback.
 
 ---
 
@@ -168,7 +167,7 @@ void drawDispenserUI() {
 
 ### UI Layout
 
-```
+```text
 ┌─────────────────────────────────────────┐
 │  Medication                    [LifeSphere] │
 ├──────────┬──────────┬──────────┬──────────┤
@@ -265,3 +264,68 @@ class MedicationDeliveryProtocol(Node):
 
         # 5. Log dispense to Firebase
         self.firebase.log_dispense(entry.entry_id, datetime.utcnow())
+```
+
+---
+
+## Prescription OCR API Reference
+
+The prescription OCR pipeline is also available as a standalone Python function for custom integrations or batch schedule imports. Call `extract_prescription` with the path to a prescription image and receive a structured medication JSON object.
+
+```python
+from lifesphere.vision import extract_prescription
+
+result = extract_prescription("path/to/prescription.jpg")
+# Returns:
+# {
+#   "medicine_name": "Metformin 500 mg",
+#   "dosage": "1 tablet",
+#   "frequency": "twice_daily",
+#   "delivery_times_utc": ["07:00", "19:00"],
+#   "duration_days": 90,
+#   "physician": "Dr. A. Osei"
+# }
+```
+
+### Signature
+
+```python
+def extract_prescription(image_path: str) -> dict:
+    """
+    Run Vision AI OCR on a prescription image and return a structured
+    medication schedule object.
+
+    Parameters
+    ----------
+    image_path : str
+        Absolute or relative path to the prescription image file.
+        Supported formats: JPEG, PNG, TIFF. The image does not need to
+        be a clean scan — the pipeline handles skew, glare, and partial
+        occlusion.
+
+    Returns
+    -------
+    dict
+        Structured medication JSON with the following keys:
+        - ``medicine_name`` (str): Drug name and strength.
+        - ``dosage`` (str): Per-dose quantity.
+        - ``frequency`` (str): One of ``once_daily``, ``twice_daily``,
+          ``three_times_daily``, ``as_needed``.
+        - ``delivery_times_utc`` (list[str]): Suggested UTC delivery
+          times inferred from the frequency.
+        - ``duration_days`` (int): Prescription duration in days.
+        - ``physician`` (str): Prescribing physician name.
+
+    Raises
+    ------
+    FileNotFoundError
+        If ``image_path`` does not point to a readable file.
+    ExtractionError
+        If the Vision AI model cannot identify required fields. Review
+        the image quality and re-photograph if needed.
+    """
+```
+
+<Note>
+  `extract_prescription` performs server-side inference — an active internet connection is required. The returned JSON must be reviewed and confirmed by the user before it is written to the Firebase schedule path at `/lifesphere/hollowcore/med_schedule/{entryId}`. Never write OCR output directly to Firebase without the mandatory user review step.
+</Note>

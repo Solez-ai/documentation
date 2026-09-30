@@ -1,5 +1,5 @@
 ---
-title: 'HollowCore Biometric-to-Environment Mapping Logic'
+title: 'HollowCore: Biometric-to-Environment Mapping Logic'
 sidebarTitle: 'Biometric Automation'
 description: 'HollowCore reads the shared physiological state object and maps each measured parameter to a deterministic relay or MQTT environment response.'
 ---
@@ -95,7 +95,7 @@ Only when both conditions hold simultaneously does `isSleepState()` return `true
 
 When `gsr` exceeds 0.6 — the threshold associated with acute sympathetic arousal and anxiety — HollowCore publishes to the SphereAI command topic rather than actuating a relay:
 
-```
+```text
 Topic:   sphereai/command
 Payload: play_calming_audio
 ```

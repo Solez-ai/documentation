@@ -1,15 +1,14 @@
 ---
 title: 'HollowRover 6-DOF Robotic Arm: Caregiving and Security'
 sidebarTitle: 'Robotic Arm'
-description: 'Six-degree-of-freedom arm specification, caregiving assist and passive security barrier modes, LiDAR occlusion constraints, and safety protocol for HollowRover.'
+description: '6-DOF arm specification for HollowRover: joint actuators, caregiving and passive security barrier modes, LiDAR occlusion constraint, and safety rules.'
 ---
 
+HollowRover's 6-DOF arm extends the rover's caregiving capability from navigation-only to **physical world interaction** — retrieving objects, presenting medication, and establishing visible deterrent barriers. It is not a general-purpose manipulator; its joint geometry and named pose library are purpose-built for the specific physical tasks that arise in autonomous caregiving.
 
 <Warning>
   The robotic arm operates exclusively in **passive** configurations. It is mechanically and programmatically prohibited from initiating contact with any person. Read the safety constraints section before modifying arm behavior in any protocol node.
 </Warning>
-
-HollowRover's 6-DOF arm extends the rover's caregiving capability from navigation-only to **physical world interaction** — retrieving objects, presenting medication, and establishing visible deterrent barriers. It is not a general-purpose manipulator; its joint geometry and named pose library are purpose-built for the specific physical tasks that arise in autonomous caregiving.
 
 ---
 
@@ -109,7 +108,7 @@ POSES = {
   <Tab title="Caregiving Assist">
     ### Object Retrieval
 
-    When a care recipient drops an object, BioPulse wearable data or a manual button press triggers the `floor_retrieve` protocol. The rover navigates to within 30 cm of the detected drop location (via RGB camera + depth from TF-Luna), confirms the object is within gripper range, moves to `floor_retrieve` pose, closes the gripper, and returns to `medication_present` height to hand the object back.
+    When a care recipient drops an object, Vital32 wearable data or a manual button press triggers the `floor_retrieve` protocol. The rover navigates to within 30 cm of the detected drop location (via RGB camera + depth from TF-Luna), confirms the object is within gripper range, moves to `floor_retrieve` pose, closes the gripper, and returns to `medication_present` height to hand the object back.
 
     Grasp confirmation uses TF-Luna distance: if the distance reading at wrist level decreases by more than 5 cm after gripper close, the grasp is considered successful. On failure, the rover opens the gripper, adjusts base rotation by ±10° and retries once before escalating to a guardian notification.
 
@@ -180,7 +179,7 @@ No single constraint can activate without the other two. The protocol node uses 
 
 ## Arm Control Node Architecture
 
-```
+```text
 /arm_command (JointTrajectory)
         │
         ▼

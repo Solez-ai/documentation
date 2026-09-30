@@ -1,17 +1,16 @@
 ---
-title: 'HollowRover: Autonomous Physical Response Robot'
+title: 'HollowRover Overview: ROS2 Autonomous Caregiving Robot'
 sidebarTitle: 'Overview'
-description: 'HollowRover is a ROS2-powered autonomous caregiving robot with SLAM navigation, UWB precision localization, and biomarker-triggered physical response protocols.'
+description: 'HollowRover is a ROS2-powered autonomous caregiving robot with SLAM, UWB localization, a 6-DOF arm, and biomarker-triggered physical response protocols.'
 ---
 
+HollowRover is an autonomous physical response unit designed for continuous, unsupervised deployment in residential and assisted-living environments. It runs **ROS2 Humble** on a **D-Robotics RDK X5** compute board — a 4 GB, 8-core Cortex-A55 SoC with a dedicated 10 TOPS neural processing unit — giving the rover the computational headroom to run real-time perception, localization, and decision pipelines simultaneously, without offloading inference to the cloud.
 
 <Note>
   HollowRover operates as the physical execution layer of the LifeSphere ecosystem — the only subsystem capable of acting on the world rather than merely sensing it.
 </Note>
 
-HollowRover is an autonomous physical response unit designed for continuous, unsupervised deployment in residential and assisted-living environments. It runs **ROS2 Humble** on a **D-Robotics RDK X5** compute board — a 4 GB, 8-core Cortex-A55 SoC with a dedicated 10 TOPS neural processing unit — giving the rover the computational headroom to run real-time perception, localization, and decision pipelines simultaneously, without offloading inference to the cloud.
-
-Unlike conventional service robots that respond to explicit commands, HollowRover is **biomarker-driven**: it receives structured alert payloads from LifeSphere's upstream sensing subsystems (BioPulse wearables, EntryGuard perimeter nodes, HollowCore AI engine) and autonomously dispatches physical protocols calibrated to the detected clinical event.
+Unlike conventional service robots that respond to explicit commands, HollowRover is **biomarker-driven**: it receives structured alert payloads from LifeSphere's upstream sensing subsystems (Vital32 wearable, EntryGuard perimeter nodes, HollowCore AI engine) and autonomously dispatches physical protocols calibrated to the detected clinical event.
 
 ---
 

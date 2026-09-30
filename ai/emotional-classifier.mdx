@@ -1,9 +1,10 @@
 ---
-title: 'SphereAI Emotional State Classifier Architecture'
+title: 'SphereAI Emotional Classifier: Trimodal Fusion Architecture'
 sidebarTitle: 'Emotional Classifier'
-description: "The trimodal Language-Voice-Biology fusion architecture powering SphereAI emotional state classification, longitudinal cognitive tracking, and Islamic care integration."
+description: "Trimodal Language-Voice-Biology fusion powering SphereAI: MetaClassifier dynamic weighting, longitudinal cognitive tracking, and Islamic care integration."
 ---
 
+SphereAI's Emotional State Classifier runs on the RDK X5 NPU every 15 minutes, fusing three independent inference agents — Language, Voice, and Biology — through a dynamic MetaClassifier that adjusts its weighting based on the reliability context of each modality at the time of inference.
 
 <Info>
   The Emotional State Classifier runs on the **RDK X5 NPU** every 15 minutes. It fuses three independent inference agents — Language, Voice, and Biology — through a dynamic MetaClassifier that adjusts its weighting based on the reliability context of each modality.
@@ -161,6 +162,44 @@ When the Language Agent detects **verbal withdrawal** (fewer than 50 tokens tran
 ---
 
 ## MetaClassifier: Dynamic Fusion Weights
+
+The MetaClassifier exposes a single inference method that accepts the three agent probability distributions and the previous emotional state as prior context:
+
+```python
+def fuse(
+    lang_out:    np.ndarray,   # shape (K,) — Language Agent class probabilities
+    voice_out:   np.ndarray,   # shape (K,) — Voice Agent class probabilities
+    bio_out:     np.ndarray,   # shape (K,) — Biology Agent class probabilities
+    prior_state: str           # previous emotional state label, e.g. "calm"
+) -> dict:
+    """
+    Fuse three agent outputs into a final emotional state prediction.
+
+    Parameters
+    ----------
+    lang_out    : np.ndarray, shape (K,)  — Language Agent probability distribution
+    voice_out   : np.ndarray, shape (K,)  — Voice Agent probability distribution
+    bio_out     : np.ndarray, shape (K,)  — Biology Agent probability distribution
+    prior_state : str                     — Previous emotional state label
+
+    Returns
+    -------
+    dict with keys:
+        "state"      : str    — Predicted emotional state label
+        "confidence" : float  — Probability of the predicted class
+        "weights"    : dict   — {"language": w_lang, "voice": w_voice, "biology": w_bio}
+    """
+    weights = _select_weights(prior_state, lang_out, voice_out, bio_out)
+    p_final = (weights["language"] * lang_out
+             + weights["voice"]    * voice_out
+             + weights["biology"]  * bio_out)
+    state_idx = int(np.argmax(p_final))
+    return {
+        "state":      CLASS_LABELS[state_idx],
+        "confidence": float(p_final[state_idx]),
+        "weights":    weights
+    }
+```
 
 The MetaClassifier combines the three agent outputs through a **weighted soft voting** scheme with context-adaptive weights $\mathbf{w} = [w_{\text{lang}}, w_{\text{voice}}, w_{\text{bio}}]$, where $\sum_i w_i = 1$:
 
